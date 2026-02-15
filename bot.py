@@ -1,7 +1,7 @@
 import telebot
 import sqlite3
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from telebot import types
 import time
 import os
@@ -28,7 +28,6 @@ bot = telebot.TeleBot(TOKEN)
 def init_db():
     conn = sqlite3.connect('dating_bot.db', check_same_thread=False)
     cur = conn.cursor()
-    # Таблица пользователей (расширена поля rating и level)
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -51,7 +50,6 @@ def init_db():
             total_dislikes INTEGER DEFAULT 0
         )
     ''')
-    # Таблица диалогов (добавлен флаг для оценки)
     cur.execute('''
         CREATE TABLE IF NOT EXISTS conversations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,21 +62,16 @@ def init_db():
             rated_by_user2 INTEGER DEFAULT 0
         )
     ''')
-    # Таблица оценок (лайки/дизлайки)
     cur.execute('''
         CREATE TABLE IF NOT EXISTS ratings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             from_user INTEGER,
             to_user INTEGER,
-            value INTEGER, -- 1 = лайк, -1 = дизлайк
+            value INTEGER,
             timestamp TIMESTAMP,
-            conversation_id INTEGER,
-            FOREIGN KEY (from_user) REFERENCES users(user_id),
-            FOREIGN KEY (to_user) REFERENCES users(user_id),
-            FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+            conversation_id INTEGER
         )
     ''')
-    # Таблица очереди ожидания
     cur.execute('''
         CREATE TABLE IF NOT EXISTS waiting_queue (
             user_id INTEGER PRIMARY KEY,
@@ -86,7 +79,6 @@ def init_db():
             search_gender TEXT
         )
     ''')
-    # Таблица жалоб
     cur.execute('''
         CREATE TABLE IF NOT EXISTS reports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,13 +86,12 @@ def init_db():
             reported_id INTEGER,
             reason TEXT,
             timestamp TIMESTAMP,
-            status TEXT DEFAULT 'new', -- new, processed, rejected
+            status TEXT DEFAULT 'new',
             admin_comment TEXT,
             conversation_id INTEGER,
             last_messages TEXT
         )
     ''')
-    # Таблица для хранения последних сообщений диалога (для жалоб)
     cur.execute('''
         CREATE TABLE IF NOT EXISTS message_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -155,7 +146,7 @@ def is_profile_complete(user_id):
     user = get_user(user_id)
     if not user:
         return False
-    return all([user[2], user[3], user[4], user[5]])  # age, gender, search_gender, bio
+    return all([user[2], user[3], user[4], user[5]])
 
 def get_active_conversation(user_id):
     conn = sqlite3.connect('dating_bot.db')
@@ -174,23 +165,17 @@ def get_partner_id(user_id, conv):
     return conv['user2_id'] if conv['user1_id'] == user_id else conv['user1_id']
 
 def end_conversation(conv_id, user_id=None):
-    """Завершает диалог и инициирует оценку, если передан user_id"""
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
-    # Получаем информацию о диалоге
     cur.execute('SELECT user1_id, user2_id, rated_by_user1, rated_by_user2 FROM conversations WHERE id = ?', (conv_id,))
     row = cur.fetchone()
     if row:
         user1, user2, rated1, rated2 = row
-        # Если диалог ещё активен, завершаем
         cur.execute('UPDATE conversations SET is_active = 0, last_message_time = ? WHERE id = ?', (datetime.now(), conv_id))
         conn.commit()
-        # Если завершаем по инициативе пользователя, предлагаем оценить
         if user_id:
             partner = user2 if user_id == user1 else user1
-            # Проверяем, оценивал ли уже этот пользователь
             if (user_id == user1 and not rated1) or (user_id == user2 and not rated2):
-                # Отправляем предложение оценить
                 bot.send_message(user_id, "Диалог завершён. Оцени собеседника:", reply_markup=get_rating_keyboard(conv_id, partner))
     conn.close()
 
@@ -222,10 +207,8 @@ def find_partner(user_id):
     user = get_user(user_id)
     if not user:
         return None, None
-
-    search_for = user[4]  # search_gender
-    my_gender = user[3]   # gender
-
+    search_for = user[4]
+    my_gender = user[3]
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
     query = '''
@@ -240,7 +223,6 @@ def find_partner(user_id):
     '''
     cur.execute(query, (user_id, search_for, search_for, my_gender))
     row = cur.fetchone()
-
     if row:
         partner_id = row[0]
         cur.execute('DELETE FROM waiting_queue WHERE user_id IN (?, ?)', (user_id, partner_id))
@@ -264,10 +246,8 @@ def ban_user(user_id, reason='Нарушение правил', admin_id=None):
     cur.execute('UPDATE conversations SET is_active = 0 WHERE user1_id = ? OR user2_id = ?', (user_id, user_id))
     conn.commit()
     conn.close()
-    # Уведомление админу
     if admin_id:
         bot.send_message(admin_id, f"✅ Пользователь {user_id} забанен. Причина: {reason}")
-    # Уведомление пользователю
     try:
         bot.send_message(user_id, f"🚫 Вы были забанены. Причина: {reason}")
     except:
@@ -308,8 +288,7 @@ def broadcast_message(text):
     cur.execute('SELECT user_id FROM users WHERE is_banned = 0')
     users = cur.fetchall()
     conn.close()
-    success = 0
-    fail = 0
+    success, fail = 0, 0
     for (user_id,) in users:
         try:
             bot.send_message(user_id, text)
@@ -320,20 +299,17 @@ def broadcast_message(text):
     return success, fail
 
 def update_user_level(user_id):
-    """Пересчитывает уровень пользователя на основе активности"""
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
     cur.execute('SELECT total_conversations, total_likes FROM users WHERE user_id = ?', (user_id,))
     row = cur.fetchone()
     if row:
         convs, likes = row
-        # Формула: уровень = 1 + floor( sqrt(convs + likes/2) )
         level = 1 + int(math.sqrt(convs + likes // 2))
         cur.execute('UPDATE users SET level = ? WHERE user_id = ?', (level, user_id))
         conn.commit()
     conn.close()
 
-# ===== ДЕКОРАТОР ПРОВЕРКИ АДМИНА =====
 def admin_only(func):
     def wrapper(message):
         if message.from_user.id != ADMIN_ID:
@@ -349,15 +325,13 @@ user_data = {}
 def cmd_start(message):
     user_id = message.from_user.id
     save_user(user_id, message.from_user.username, message.from_user.first_name)
-
     if is_user_banned(user_id):
         bot.reply_to(message, "🚫 Вы забанены и не можете пользоваться ботом.")
         return
-
     if is_profile_complete(user_id):
         show_main_menu(message.chat.id)
     else:
-        bot.send_message(user_id, "👋 Привет! Давай создадим твою анкету.\n\nСколько тебе лет? (введи число)")
+        bot.send_message(user_id, "👋 Привет! Давай создадим твою анкету для анонимного общения.\n\nСколько тебе лет? (введи число)")
         user_data[user_id] = {'step': 'age'}
 
 @bot.message_handler(func=lambda m: m.from_user.id in user_data and user_data[m.from_user.id]['step'] == 'age')
@@ -389,7 +363,7 @@ def process_gender(message):
     user_data[user_id]['step'] = 'search_gender'
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     markup.add('Парней', 'Девушек', 'Всех')
-    bot.send_message(user_id, "Кого ты хочешь искать?", reply_markup=markup)
+    bot.send_message(user_id, "Кого ты хочешь искать для общения?", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.from_user.id in user_data and user_data[m.from_user.id]['step'] == 'search_gender')
 def process_search_gender(message):
@@ -403,7 +377,7 @@ def process_search_gender(message):
         search = 'both'
     user_data[user_id]['search_gender'] = search
     user_data[user_id]['step'] = 'bio'
-    bot.send_message(user_id, "Напиши немного о себе (до 300 символов).", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(user_id, "Напиши немного о себе (чем увлекаешься, что ищешь). Можно не более 300 символов.", reply_markup=types.ReplyKeyboardRemove())
 
 @bot.message_handler(func=lambda m: m.from_user.id in user_data and user_data[m.from_user.id]['step'] == 'bio')
 def process_bio(message):
@@ -413,7 +387,7 @@ def process_bio(message):
     user_data[user_id]['step'] = 'photo'
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     markup.add('Пропустить')
-    bot.send_message(user_id, "Отправь своё фото (необязательно) или нажми 'Пропустить'.", reply_markup=markup)
+    bot.send_message(user_id, "Отправь своё фото (необязательно, но повысит шансы на общение). Или нажми 'Пропустить'.", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.from_user.id in user_data and user_data[m.from_user.id]['step'] == 'photo', content_types=['photo', 'text'])
 def process_photo(message):
@@ -422,8 +396,15 @@ def process_photo(message):
     if message.content_type == 'photo':
         photo_id = message.photo[-1].file_id
     data = user_data.pop(user_id)
-    update_user_profile(user_id, data['age'], data['gender'], data['search_gender'], data['bio'], photo_id)
-    bot.send_message(user_id, "✅ Анкета сохранена!", reply_markup=types.ReplyKeyboardRemove())
+    update_user_profile(
+        user_id,
+        data['age'],
+        data['gender'],
+        data['search_gender'],
+        data['bio'],
+        photo_id
+    )
+    bot.send_message(user_id, "✅ Анкета сохранена! Теперь ты можешь искать собеседников.", reply_markup=types.ReplyKeyboardRemove())
     show_main_menu(user_id)
 
 def show_main_menu(chat_id):
@@ -434,7 +415,6 @@ def show_main_menu(chat_id):
     markup.add('🏆 Топ пользователей')
     bot.send_message(chat_id, "Главное меню:", reply_markup=markup)
 
-# ===== ПРОВЕРКА БАНА =====
 def is_user_banned(user_id):
     user = get_user(user_id)
     return user and user[10] == 1
@@ -457,8 +437,13 @@ def show_profile(message):
 Уровень: {user[12]}
 Рейтинг: {user[11]}
     """
+    # Пробуем отправить фото, если есть, но перехватываем ошибку
     if user[6]:
-        bot.send_photo(user_id, user[6], caption=profile_text)
+        try:
+            bot.send_photo(user_id, user[6], caption=profile_text)
+        except Exception as e:
+            logger.error(f"Ошибка отправки фото пользователю {user_id}: {e}")
+            bot.send_message(user_id, profile_text + "\n(Фото не удалось загрузить)")
     else:
         bot.send_message(user_id, profile_text)
 
@@ -485,12 +470,12 @@ def cmd_search(message):
     bot.send_message(user_id, "🔍 Ищу собеседника...")
     partner_id, conv_id = find_partner(user_id)
     if partner_id:
-        bot.send_message(user_id, "✅ Собеседник найден! Можете общаться.")
-        bot.send_message(partner_id, "✅ Собеседник найден! Можете общаться.")
+        bot.send_message(user_id, "✅ Собеседник найден! Можете общаться анонимно.\nОтправляй текст, фото, видео, стикеры.")
+        bot.send_message(partner_id, "✅ Собеседник найден! Можете общаться анонимно.\nОтправляй текст, фото, видео, стикеры.")
     else:
         user = get_user(user_id)
         add_to_waiting(user_id, user[4])
-        bot.send_message(user_id, "🕒 Пока никого нет. Ты в очереди.")
+        bot.send_message(user_id, "🕒 Пока никого нет. Ты добавлен в очередь. Как только появится подходящий собеседник, я сообщу.")
 
 @bot.message_handler(func=lambda m: m.text == '⏹ Завершить диалог' or m.text == '/stop')
 def cmd_stop(message):
@@ -499,8 +484,13 @@ def cmd_stop(message):
     if not conv:
         bot.send_message(user_id, "❌ У тебя нет активного диалога.")
         return
+    partner_id = get_partner_id(user_id, conv)
     end_conversation(conv['id'], user_id)
     bot.send_message(user_id, "⏹ Диалог завершён.")
+    try:
+        bot.send_message(partner_id, "👋 Собеседник покинул чат. Диалог завершён.")
+    except:
+        pass
 
 @bot.message_handler(func=lambda m: m.text == '/next')
 def cmd_next(message):
@@ -512,7 +502,7 @@ def cmd_stats(message):
     total, banned, active, waiting = get_stats()
     stats_text = f"""
 📊 Статистика бота:
-👥 Всего: {total}
+👥 Всего пользователей: {total}
 🚫 Забанено: {banned}
 💬 Активных диалогов: {active}
 🕒 В очереди: {waiting}
@@ -566,20 +556,17 @@ def cmd_top(message):
 
 @bot.message_handler(commands=['report'])
 def cmd_report(message):
-    """Пожаловаться на текущего собеседника"""
     user_id = message.from_user.id
     conv = get_active_conversation(user_id)
     if not conv:
         bot.reply_to(message, "❌ У тебя нет активного диалога, чтобы на кого-то пожаловаться.")
         return
     partner_id = get_partner_id(user_id, conv)
-    # Спрашиваем причину
     msg = bot.reply_to(message, "Опиши причину жалобы (можно одним сообщением):")
     bot.register_next_step_handler(msg, process_report, conv['id'], user_id, partner_id)
 
 def process_report(message, conv_id, reporter_id, reported_id):
     reason = message.text[:500]
-    # Сохраняем последние 10 сообщений диалога
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
     cur.execute('''
@@ -589,7 +576,6 @@ def process_report(message, conv_id, reporter_id, reported_id):
     ''', (conv_id,))
     logs = cur.fetchall()
     log_text = "\n".join([f"{'Собеседник' if uid == reported_id else 'Вы'}: {msg}" for uid, msg in reversed(logs)])
-    # Сохраняем жалобу
     cur.execute('''
         INSERT INTO reports (reporter_id, reported_id, reason, timestamp, conversation_id, last_messages, status)
         VALUES (?, ?, ?, ?, ?, ?, 'new')
@@ -597,7 +583,6 @@ def process_report(message, conv_id, reporter_id, reported_id):
     conn.commit()
     report_id = cur.lastrowid
     conn.close()
-    # Уведомляем админа
     admin_msg = f"""
 🚨 Новая жалоба #{report_id}
 От: {reporter_id}
@@ -618,11 +603,8 @@ def callback_rate(call):
     partner_id = int(partner_id)
     value = int(value)
     user_id = call.from_user.id
-
-    # Сохраняем оценку
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
-    # Проверяем, не оценивал ли уже
     cur.execute('SELECT rated_by_user1, rated_by_user2 FROM conversations WHERE id = ?', (conv_id,))
     row = cur.fetchone()
     if not row:
@@ -630,17 +612,14 @@ def callback_rate(call):
         return
     rated1, rated2 = row
     if (user_id == row[0] and not rated1) or (user_id == row[1] and not rated2):
-        # Записываем оценку
         cur.execute('''
             INSERT INTO ratings (from_user, to_user, value, timestamp, conversation_id)
             VALUES (?, ?, ?, ?, ?)
         ''', (user_id, partner_id, value, datetime.now(), conv_id))
-        # Обновляем рейтинг пользователя
         if value == 1:
             cur.execute('UPDATE users SET rating = rating + 1, total_likes = total_likes + 1 WHERE user_id = ?', (partner_id,))
         else:
             cur.execute('UPDATE users SET rating = rating - 1, total_dislikes = total_dislikes + 1 WHERE user_id = ?', (partner_id,))
-        # Обновляем флаги в диалоге
         if user_id == row[0]:
             cur.execute('UPDATE conversations SET rated_by_user1 = 1 WHERE id = ?', (conv_id,))
         else:
@@ -784,7 +763,7 @@ def list_reports(message):
         return
     text = "📋 **Новые жалобы:**\n\n"
     for r in reports:
-        text += f"#{r[0]} от {r[3][:16]}: {r[1]} -> {r[2]}\nПричина: {r[3][:50]}...\n"
+        text += f"#{r[0]} от {r[4][:16]}: {r[1]} -> {r[2]}\nПричина: {r[3][:50]}...\n"
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['report'])
@@ -822,35 +801,6 @@ def view_report(message):
     """
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
-# Обработка ответов админа на жалобы для бана
-@bot.message_handler(func=lambda m: m.reply_to_message and m.text.startswith('/ban'))
-@admin_only
-def admin_ban_from_report(message):
-    # Извлекаем ID из текста жалобы или из аргументов
-    try:
-        parts = message.text.split()
-        if len(parts) >= 2:
-            user_id = int(parts[1])
-            reason = ' '.join(parts[2:]) if len(parts) > 2 else "Нарушение правил (по жалобе)"
-        else:
-            # Пытаемся извлечь из текста, на который отвечаем
-            text = message.reply_to_message.text
-            # Ищем ID: обычно после "На: " или подобного
-            import re
-            match = re.search(r'На:\s*(\d+)', text)
-            if match:
-                user_id = int(match.group(1))
-                reason = "Нарушение по жалобе"
-            else:
-                bot.reply_to(message, "❌ Не удалось определить ID пользователя.")
-                return
-        ban_user(user_id, reason, message.from_user.id)
-        # Обновляем статус жалобы (можно по тексту жалобы определить её ID)
-        # Упрощённо: просто сообщаем админу
-        bot.reply_to(message, f"✅ Пользователь {user_id} забанен.")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
-
 # ===== ОБРАБОТКА СООБЩЕНИЙ В ДИАЛОГЕ И ЛОГИРОВАНИЕ =====
 @bot.message_handler(func=lambda m: True, content_types=['text', 'photo', 'video', 'sticker', 'voice', 'document'])
 def handle_chat_message(message):
@@ -865,8 +815,6 @@ def handle_chat_message(message):
         bot.send_message(user_id, "❌ У тебя нет активного диалога. Найди собеседника в меню.")
         return
     partner_id = get_partner_id(user_id, conv)
-
-    # Логируем сообщение
     try:
         msg_text = message.text or message.caption or f"[{message.content_type}]"
         conn = sqlite3.connect('dating_bot.db')
@@ -879,8 +827,6 @@ def handle_chat_message(message):
         conn.close()
     except Exception as e:
         logger.error(f"Ошибка логирования: {e}")
-
-    # Пересылаем
     try:
         if message.content_type == 'text':
             bot.send_message(partner_id, f"💬 {message.text}")
@@ -897,7 +843,7 @@ def handle_chat_message(message):
         else:
             bot.send_message(partner_id, f"📦 Сообщение (тип: {message.content_type})")
     except Exception as e:
-        logger.error(f"Ошибка отправки: {e}")
+        logger.error(f"Ошибка отправки сообщения от {user_id} к {partner_id}: {e}")
         bot.send_message(user_id, "❌ Не удалось отправить сообщение. Возможно, собеседник покинул чат.")
         end_conversation(conv['id'])
 
@@ -908,7 +854,6 @@ if __name__ == '__main__':
     print("=" * 50)
     print(f"👑 Админ ID: {ADMIN_ID}")
     print("🟢 Запуск...")
-
     # Удаляем вебхук и запускаем polling
     bot.remove_webhook()
     time.sleep(1)
