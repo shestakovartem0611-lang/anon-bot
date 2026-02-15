@@ -1,16 +1,17 @@
 import telebot
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from telebot import types
 import time
 import os
 import math
-import re  # добавил для обработки бана из ответа
+import re
 
 # ===== НАСТРОЙКИ =====
 TOKEN = '8494465153:AAGhNsVnNmDE0LTtSSh2A5GE013Wptw0tvw'  # твой токен
 ADMIN_ID = 1760627021     # твой ID
+PROVIDER_TOKEN = 'YOUR_PROVIDER_TOKEN'  # токен для платежей (получить у @BotFather)
 
 # Настройка логирования
 logging.basicConfig(
@@ -29,6 +30,7 @@ bot = telebot.TeleBot(TOKEN)
 def init_db():
     conn = sqlite3.connect('dating_bot.db', check_same_thread=False)
     cur = conn.cursor()
+    # Таблица пользователей (добавлены поля coins, last_bonus)
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -48,9 +50,32 @@ def init_db():
             level INTEGER DEFAULT 1,
             total_conversations INTEGER DEFAULT 0,
             total_likes INTEGER DEFAULT 0,
-            total_dislikes INTEGER DEFAULT 0
+            total_dislikes INTEGER DEFAULT 0,
+            coins INTEGER DEFAULT 0,
+            last_bonus TIMESTAMP
         )
     ''')
+    # Таблица достижений
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS achievements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            description TEXT,
+            condition_type TEXT,
+            condition_value INTEGER,
+            reward_coins INTEGER
+        )
+    ''')
+    # Таблица полученных достижений пользователями
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS user_achievements (
+            user_id INTEGER,
+            achievement_id INTEGER,
+            unlocked_at TIMESTAMP,
+            PRIMARY KEY (user_id, achievement_id)
+        )
+    ''')
+    # Таблица диалогов
     cur.execute('''
         CREATE TABLE IF NOT EXISTS conversations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,6 +88,7 @@ def init_db():
             rated_by_user2 INTEGER DEFAULT 0
         )
     ''')
+    # Таблица оценок
     cur.execute('''
         CREATE TABLE IF NOT EXISTS ratings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,6 +99,7 @@ def init_db():
             conversation_id INTEGER
         )
     ''')
+    # Таблица очереди
     cur.execute('''
         CREATE TABLE IF NOT EXISTS waiting_queue (
             user_id INTEGER PRIMARY KEY,
@@ -80,6 +107,7 @@ def init_db():
             search_gender TEXT
         )
     ''')
+    # Таблица жалоб
     cur.execute('''
         CREATE TABLE IF NOT EXISTS reports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,6 +121,7 @@ def init_db():
             last_messages TEXT
         )
     ''')
+    # Таблица логов сообщений
     cur.execute('''
         CREATE TABLE IF NOT EXISTS message_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,6 +132,27 @@ def init_db():
         )
     ''')
     conn.commit()
+    # Заполняем таблицу достижений, если пусто
+    cur.execute('SELECT COUNT(*) FROM achievements')
+    if cur.fetchone()[0] == 0:
+        achievements = [
+            ('Первый шаг', 'Провести первый диалог', 'conversations', 1, 5),
+            ('Болтун', 'Провести 10 диалогов', 'conversations', 10, 20),
+            ('Звезда', 'Получить 10 лайков', 'likes', 10, 15),
+            ('Популярный', 'Получить 50 лайков', 'likes', 50, 50),
+            ('Джентльмен', 'Получить 5 комплиментов (лайков подряд?)', 'consecutive_likes', 5, 10),  # упростим
+            ('Завсегдатай', 'Заходить 7 дней подряд', 'streak_days', 7, 30),
+            ('Фотогеничный', 'Загрузить фото', 'photo', 1, 5),
+            ('Душа компании', 'Провести 5 диалогов за день', 'daily_conversations', 5, 25),
+            ('Модератор', 'Отправить 3 жалобы', 'reports', 3, 10),
+            ('Благодетель', 'Сделать донат', 'donation', 1, 0)  # без награды монетами
+        ]
+        for a in achievements:
+            cur.execute('''
+                INSERT INTO achievements (name, description, condition_type, condition_value, reward_coins)
+                VALUES (?, ?, ?, ?, ?)
+            ''', a)
+        conn.commit()
     conn.close()
     logger.info("✅ База данных инициализирована")
 
@@ -174,8 +224,14 @@ def end_conversation(conv_id):
     if row:
         user1, user2, rated1, rated2 = row
         cur.execute('UPDATE conversations SET is_active = 0, last_message_time = ? WHERE id = ?', (datetime.now(), conv_id))
+        # Увеличиваем счётчик диалогов у обоих пользователей
+        cur.execute('UPDATE users SET total_conversations = total_conversations + 1 WHERE user_id IN (?, ?)', (user1, user2))
         conn.commit()
         conn.close()
+
+        # Проверяем достижения для обоих
+        check_achievements(user1)
+        check_achievements(user2)
 
         def get_feedback_keyboard(conv_id, partner_id):
             markup = types.InlineKeyboardMarkup(row_width=3)
@@ -327,6 +383,54 @@ def update_user_level(user_id):
         conn.commit()
     conn.close()
 
+def check_achievements(user_id):
+    """Проверяет и выдаёт достижения пользователю"""
+    conn = sqlite3.connect('dating_bot.db')
+    cur = conn.cursor()
+    # Получаем все достижения
+    cur.execute('SELECT id, condition_type, condition_value, reward_coins FROM achievements')
+    achievements = cur.fetchall()
+    # Получаем данные пользователя для проверки
+    cur.execute('''
+        SELECT total_conversations, total_likes, coins, last_bonus, photo_file_id
+        FROM users WHERE user_id = ?
+    ''', (user_id,))
+    user_data = cur.fetchone()
+    if not user_data:
+        conn.close()
+        return
+    convs, likes, coins, last_bonus, photo = user_data
+
+    # Проверяем каждое достижение
+    for ach_id, cond_type, cond_val, reward in achievements:
+        # Проверяем, получено ли уже
+        cur.execute('SELECT 1 FROM user_achievements WHERE user_id = ? AND achievement_id = ?', (user_id, ach_id))
+        if cur.fetchone():
+            continue
+        unlocked = False
+        if cond_type == 'conversations':
+            if convs >= cond_val:
+                unlocked = True
+        elif cond_type == 'likes':
+            if likes >= cond_val:
+                unlocked = True
+        elif cond_type == 'photo':
+            if photo:
+                unlocked = True
+        # Добавить другие условия по необходимости
+
+        if unlocked:
+            # Начисляем награду
+            cur.execute('UPDATE users SET coins = coins + ? WHERE user_id = ?', (reward, user_id))
+            cur.execute('INSERT INTO user_achievements (user_id, achievement_id, unlocked_at) VALUES (?, ?, ?)',
+                        (user_id, ach_id, datetime.now()))
+            # Уведомляем пользователя
+            cur.execute('SELECT name, description FROM achievements WHERE id = ?', (ach_id,))
+            name, desc = cur.fetchone()
+            bot.send_message(user_id, f"🏆 Достижение разблокировано: {name}\n{desc}\n+{reward} монет!")
+    conn.commit()
+    conn.close()
+
 # ===== ДЕКОРАТОР ПРОВЕРКИ АДМИНА =====
 def admin_only(func):
     def wrapper(message):
@@ -425,7 +529,8 @@ def show_main_menu(chat_id):
     markup.add('🔍 Найти собеседника', '⏹ Завершить диалог')
     markup.add('👤 Моя анкета', '✏ Редактировать анкету')
     markup.add('📊 Статистика', '📈 Моя статистика')
-    markup.add('🏆 Топ пользователей')
+    markup.add('🏆 Топ', '🎁 Бонус', '✨ Сгенерировать описание')
+    markup.add('💰 Донат')
     bot.send_message(chat_id, "Главное меню:", reply_markup=markup)
 
 # ===== ПРОВЕРКА БАНА =====
@@ -450,6 +555,7 @@ def show_profile(message):
 О себе: {user[5]}
 Уровень: {user[12]}
 Рейтинг: {user[11]}
+Монеты: {user[18]}
     """
     if user[6]:
         try:
@@ -530,6 +636,8 @@ def cmd_mystats(message):
     likes = cur.fetchone()[0]
     cur.execute('SELECT COUNT(*) FROM ratings WHERE to_user = ? AND value = -1', (user_id,))
     dislikes = cur.fetchone()[0]
+    cur.execute('SELECT COUNT(*) FROM user_achievements WHERE user_id = ?', (user_id,))
+    achievements_count = cur.fetchone()[0]
     conn.close()
     text = f"""
 📈 Твоя статистика:
@@ -538,28 +646,152 @@ def cmd_mystats(message):
 👎 Дизлайков: {dislikes}
 ⭐ Рейтинг: {user[11]}
 📊 Уровень: {user[12]}
+🪙 Монеты: {user[18]}
+🏆 Достижений: {achievements_count}
     """
     bot.send_message(message.chat.id, text)
 
-@bot.message_handler(func=lambda m: m.text == '🏆 Топ пользователей' or m.text == '/top')
-def cmd_top(message):
+@bot.message_handler(func=lambda m: m.text == '🏆 Топ' or m.text == '/top')
+def cmd_top_menu(message):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_rating = types.InlineKeyboardButton("По рейтингу", callback_data="top_rating")
+    btn_coins = types.InlineKeyboardButton("По монетам", callback_data="top_coins")
+    btn_level = types.InlineKeyboardButton("По уровню", callback_data="top_level")
+    markup.add(btn_rating, btn_coins, btn_level)
+    bot.send_message(message.chat.id, "Выбери категорию топа:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('top_'))
+def callback_top(call):
+    category = call.data.split('_')[1]
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
-    cur.execute('''
-        SELECT user_id, first_name, rating, level FROM users
-        WHERE is_banned = 0 AND rating > 0
-        ORDER BY rating DESC, level DESC
-        LIMIT 10
-    ''')
+    if category == 'rating':
+        cur.execute('''
+            SELECT user_id, first_name, rating, level FROM users
+            WHERE is_banned = 0 AND rating > 0
+            ORDER BY rating DESC, level DESC
+            LIMIT 10
+        ''')
+    elif category == 'coins':
+        cur.execute('''
+            SELECT user_id, first_name, coins, level FROM users
+            WHERE is_banned = 0 AND coins > 0
+            ORDER BY coins DESC, level DESC
+            LIMIT 10
+        ''')
+    elif category == 'level':
+        cur.execute('''
+            SELECT user_id, first_name, level, rating FROM users
+            WHERE is_banned = 0
+            ORDER BY level DESC, rating DESC
+            LIMIT 10
+        ''')
     top = cur.fetchall()
     conn.close()
     if not top:
-        bot.send_message(message.chat.id, "Пока нет пользователей с рейтингом.")
+        bot.send_message(call.message.chat.id, "В этой категории пока нет данных.")
         return
-    text = "🏆 Топ-10 пользователей:\n\n"
-    for i, (uid, name, rating, level) in enumerate(top, 1):
-        text += f"{i}. {name or 'Без имени'} (ID: {uid}) — рейтинг {rating}, уровень {level}\n"
-    bot.send_message(message.chat.id, text)
+    text = f"🏆 Топ-10 по {category}:\n\n"
+    for i, (uid, name, val1, val2) in enumerate(top, 1):
+        if category == 'rating':
+            text += f"{i}. {name or 'Без имени'} — рейтинг {val1}, уровень {val2}\n"
+        elif category == 'coins':
+            text += f"{i}. {name or 'Без имени'} — монет {val1}, уровень {val2}\n"
+        elif category == 'level':
+            text += f"{i}. {name or 'Без имени'} — уровень {val1}, рейтинг {val2}\n"
+    bot.send_message(call.message.chat.id, text)
+    bot.answer_callback_query(call.id)
+
+@bot.message_handler(func=lambda m: m.text == '🎁 Бонус' or m.text == '/bonus')
+def cmd_bonus(message):
+    user_id = message.from_user.id
+    conn = sqlite3.connect('dating_bot.db')
+    cur = conn.cursor()
+    cur.execute('SELECT last_bonus FROM users WHERE user_id = ?', (user_id,))
+    row = cur.fetchone()
+    last_bonus = row[0]
+    today = datetime.now().date()
+    if last_bonus:
+        last_date = datetime.fromisoformat(last_bonus).date()
+        if last_date == today:
+            bot.send_message(user_id, "❌ Ты уже получал бонус сегодня. Приходи завтра!")
+            conn.close()
+            return
+    # Начисляем бонус (10 монет)
+    cur.execute('UPDATE users SET coins = coins + 10, last_bonus = ? WHERE user_id = ?', (datetime.now(), user_id))
+    conn.commit()
+    conn.close()
+    bot.send_message(user_id, "🎉 Ты получил ежедневный бонус: +10 монет!")
+
+@bot.message_handler(func=lambda m: m.text == '✨ Сгенерировать описание' or m.text == '/generate_bio')
+def cmd_generate_bio(message):
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    if not user:
+        return
+    # Простая генерация на основе пола и возраста
+    gender_str = {'male': 'парень', 'female': 'девушка', 'other': 'человек'}.get(user[3], 'человек')
+    age = user[2]
+    # Спрашиваем интересы
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    markup.add('Музыка', 'Спорт', 'Кино', 'Книги', 'Путешествия', 'Игры', 'Другое')
+    msg = bot.send_message(user_id, "Выбери свои интересы (можно несколько, через запятую):", reply_markup=markup)
+    bot.register_next_step_handler(msg, process_interests_for_bio, user_id, gender_str, age)
+
+def process_interests_for_bio(message, user_id, gender_str, age):
+    interests = message.text
+    bio = f"Привет! Я {gender_str}, мне {age} лет. Интересуюсь: {interests}. Буду рад(а) пообщаться!"
+    # Сохраняем в БД
+    conn = sqlite3.connect('dating_bot.db')
+    cur = conn.cursor()
+    cur.execute('UPDATE users SET bio = ? WHERE user_id = ?', (bio, user_id))
+    conn.commit()
+    conn.close()
+    bot.send_message(user_id, f"✅ Описание сгенерировано и сохранено:\n{bio}", reply_markup=types.ReplyKeyboardRemove())
+    show_main_menu(user_id)
+
+@bot.message_handler(func=lambda m: m.text == '💰 Донат' or m.text == '/donate')
+def cmd_donate(message):
+    # Создаём инвойс на 50 звёзд (можно изменить)
+    prices = [types.LabeledPrice(label='Поддержка бота', amount=5000)]  # 50.00 RUB (в копейках) или 50 звёзд? Для Stars amount = количество звёзд * 100? На самом деле Stars передаются в минимальных единицах (1 звезда = 1 цент). В документации: для Stars нужно использовать валюту "XTR" и amount = количество звёзд.
+    # Но для простоты используем стандартную валюту RUB, а для Stars нужно указывать "XTR"
+    # Предположим, что PROVIDER_TOKEN настроен на приём Stars
+    bot.send_invoice(
+        message.chat.id,
+        title='Поддержка бота',
+        description='Отправь донат, чтобы поддержать развитие бота',
+        invoice_payload='donation_payload',
+        provider_token=PROVIDER_TOKEN,
+        currency='XTR',  # для Stars
+        prices=[types.LabeledPrice(label='Донат', amount=50)],  # 50 звёзд
+        start_parameter='donate',
+        photo_url=None,
+        photo_height=None,
+        photo_width=None,
+        need_name=False,
+        need_phone_number=False,
+        need_email=False,
+        need_shipping_address=False,
+        is_flexible=False
+    )
+
+@bot.pre_checkout_query_handler(func=lambda query: True)
+def pre_checkout_query(query):
+    # Обязательно подтверждаем
+    bot.answer_pre_checkout_query(query.id, ok=True)
+
+@bot.message_handler(content_types=['successful_payment'])
+def successful_payment(message):
+    user_id = message.from_user.id
+    # Начисляем бонус за донат (например, +100 монет)
+    conn = sqlite3.connect('dating_bot.db')
+    cur = conn.cursor()
+    cur.execute('UPDATE users SET coins = coins + 100 WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+    bot.send_message(user_id, "✅ Спасибо за поддержку! Тебе начислено 100 монет.")
+    # Проверяем достижение "Благодетель"
+    check_achievements(user_id)
 
 # ===== ОБРАБОТКА РЕЙТИНГА И ЖАЛОБ =====
 @bot.callback_query_handler(func=lambda call: call.data.startswith('rate_'))
@@ -578,7 +810,6 @@ def callback_rate(call):
         conn.close()
         return
     rated1, rated2 = row
-    # Определяем, какой это пользователь
     cur.execute('SELECT user1_id, user2_id FROM conversations WHERE id = ?', (conv_id,))
     u1, u2 = cur.fetchone()
     if user_id == u1:
@@ -586,7 +817,7 @@ def callback_rate(call):
     elif user_id == u2:
         already_rated = rated2
     else:
-        already_rated = True  # не участник диалога
+        already_rated = True
 
     if not already_rated:
         cur.execute('''
@@ -603,6 +834,8 @@ def callback_rate(call):
             cur.execute('UPDATE conversations SET rated_by_user2 = 1 WHERE id = ?', (conv_id,))
         conn.commit()
         update_user_level(partner_id)
+        # Проверяем достижения для оцениваемого
+        check_achievements(partner_id)
         bot.answer_callback_query(call.id, "Спасибо за оценку!")
         bot.edit_message_text("Оценка учтена. Спасибо!", call.message.chat.id, call.message.message_id)
     else:
@@ -611,7 +844,6 @@ def callback_rate(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('report_'))
 def callback_report_start(call):
-    """Начинает процесс жалобы: запрашивает причину"""
     _, conv_id, reported_id = call.data.split('_')
     conv_id = int(conv_id)
     reported_id = int(reported_id)
@@ -622,12 +854,11 @@ def callback_report_start(call):
         'conv_id': conv_id,
         'reported_id': reported_id
     }
-    bot.send_message(reporter_id, "Опишите причину жалобы (одним сообщением):")
+    bot.send_message(reporter_id, "Опиши причину жалобы (одним сообщением):")
     bot.answer_callback_query(call.id)
 
 @bot.message_handler(func=lambda m: m.from_user.id in user_data and user_data[m.from_user.id].get('step') == 'report_reason')
 def process_report_reason(message):
-    """Получает причину жалобы, сохраняет в БД и отправляет админу"""
     user_id = message.from_user.id
     reason = message.text[:500]
 
@@ -666,6 +897,8 @@ def process_report_reason(message):
     """
     bot.send_message(ADMIN_ID, admin_msg, parse_mode='Markdown')
     bot.send_message(user_id, "✅ Жалоба отправлена администратору. Спасибо!")
+    # Проверяем достижение "Модератор"
+    check_achievements(user_id)
 
 # ===== АДМИН-ПАНЕЛЬ =====
 @bot.message_handler(commands=['admin'])
@@ -696,6 +929,8 @@ def admin_stats(message):
     active_today = cur.fetchone()[0]
     cur.execute("SELECT COUNT(*) FROM conversations WHERE date(start_time) = date('now')")
     new_chats_today = cur.fetchone()[0]
+    cur.execute("SELECT SUM(coins) FROM users")
+    total_coins = cur.fetchone()[0] or 0
     conn.close()
     text = f"""
 📈 **Детальная статистика**
@@ -705,6 +940,7 @@ def admin_stats(message):
 🕒 В очереди: {waiting}
 📅 Активных сегодня: {active_today}
 🆕 Новых чатов сегодня: {new_chats_today}
+🪙 Всего монет: {total_coins}
     """
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
@@ -911,7 +1147,7 @@ def handle_chat_message(message):
 # ===== ЗАПУСК =====
 if __name__ == '__main__':
     print("=" * 50)
-    print("🤖 Анонимный чат-бот с улучшенной системой жалоб")
+    print("🤖 Анонимный чат-бот с бонусами, ачивками и донатами")
     print("=" * 50)
     print(f"👑 Админ ID: {ADMIN_ID}")
     print("🟢 Запуск...")
