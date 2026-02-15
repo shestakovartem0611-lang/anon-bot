@@ -639,23 +639,45 @@ def handle_chat_message(message):
         # Завершаем диалог
         end_conversation(conv['id'])
 
-# ===== ЗАПУСК =====
+# ===== ЗАПУСК ЧЕРЕЗ ВЕБХУКИ (ДЛЯ БОТХОСТА) =====
 if __name__ == '__main__':
+    import time
+    import logging
+    from flask import Flask, request
+    import os
+
+    logger = logging.getLogger(__name__)
+    
+    # Создаём простенькое Flask-приложение
+    app = Flask(__name__)
+
+    @app.route('/', methods=['POST'])
+    def webhook():
+        """Здесь Telegram будет присылать обновления"""
+        json_str = request.get_data().decode('UTF-8')
+        update = telebot.types.Update.de_json(json_str)
+        bot.process_new_updates([update])
+        return 'OK', 200
+
+    @app.route('/')
+    def index():
+        return 'Бот работает!', 200
+
+    # Удаляем старый вебхук на всякий случай
+    bot.remove_webhook()
+    time.sleep(1)
+
+    # ВНИМАНИЕ! СЮДА НУЖНО ВСТАВИТЬ СВОЙ URL, КОТОРЫЙ ДАЁТ BOTHOST
+    WEBHOOK_URL = ''  # ЗАМЕНИ ЭТУ СТРОКУ!
+    bot.set_webhook(url=WEBHOOK_URL)
+
     print("=" * 50)
-    print("🤖 Анонимный чат-бот с админ-панелью запущен")
+    print("🤖 Анонимный чат-бот запущен в режиме вебхуков")
     print("=" * 50)
     print(f"👑 Админ ID: {ADMIN_ID}")
-    print("🟢 Нажми Ctrl+C для остановки")
+    print(f"🌐 Вебхук установлен на: {WEBHOOK_URL}")
     print("=" * 50)
 
-    # Проверка токена
-    if TOKEN == 'ТОКЕН_БОТА_СЮДА':
-        print("❌ ОШИБКА: Не вставлен токен!")
-        exit(1)
-
-    try:
-        bot.infinity_polling()
-    except KeyboardInterrupt:
-        print("\n🛑 Бот остановлен")
-    except Exception as e:
-        logger.critical(f"Критическая ошибка: {e}")
+    # Запускаем Flask-сервер
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
