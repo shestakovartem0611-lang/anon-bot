@@ -1,7 +1,7 @@
 import telebot
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from telebot import types
 import time
 import os
@@ -28,6 +28,7 @@ bot = telebot.TeleBot(TOKEN)
 def init_db():
     conn = sqlite3.connect('dating_bot.db', check_same_thread=False)
     cur = conn.cursor()
+    # Таблица пользователей
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -50,6 +51,7 @@ def init_db():
             total_dislikes INTEGER DEFAULT 0
         )
     ''')
+    # Таблица диалогов
     cur.execute('''
         CREATE TABLE IF NOT EXISTS conversations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,6 +64,7 @@ def init_db():
             rated_by_user2 INTEGER DEFAULT 0
         )
     ''')
+    # Таблица оценок
     cur.execute('''
         CREATE TABLE IF NOT EXISTS ratings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,6 +75,7 @@ def init_db():
             conversation_id INTEGER
         )
     ''')
+    # Таблица очереди
     cur.execute('''
         CREATE TABLE IF NOT EXISTS waiting_queue (
             user_id INTEGER PRIMARY KEY,
@@ -79,6 +83,7 @@ def init_db():
             search_gender TEXT
         )
     ''')
+    # Таблица жалоб
     cur.execute('''
         CREATE TABLE IF NOT EXISTS reports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,6 +97,7 @@ def init_db():
             last_messages TEXT
         )
     ''')
+    # Таблица логов сообщений
     cur.execute('''
         CREATE TABLE IF NOT EXISTS message_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,6 +152,7 @@ def is_profile_complete(user_id):
     user = get_user(user_id)
     if not user:
         return False
+    # Проверяем, что возраст, пол, поиск и био не пустые
     return all([user[2], user[3], user[4], user[5]])
 
 def get_active_conversation(user_id):
@@ -176,15 +183,12 @@ def end_conversation(conv_id, user_id=None):
         if user_id:
             partner = user2 if user_id == user1 else user1
             if (user_id == user1 and not rated1) or (user_id == user2 and not rated2):
-                bot.send_message(user_id, "Диалог завершён. Оцени собеседника:", reply_markup=get_rating_keyboard(conv_id, partner))
+                markup = types.InlineKeyboardMarkup(row_width=2)
+                btn_like = types.InlineKeyboardButton("👍", callback_data=f"rate_{conv_id}_{partner}_1")
+                btn_dislike = types.InlineKeyboardButton("👎", callback_data=f"rate_{conv_id}_{partner}_-1")
+                markup.add(btn_like, btn_dislike)
+                bot.send_message(user_id, "Диалог завершён. Оцени собеседника:", reply_markup=markup)
     conn.close()
-
-def get_rating_keyboard(conv_id, partner_id):
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_like = types.InlineKeyboardButton("👍", callback_data=f"rate_{conv_id}_{partner_id}_1")
-    btn_dislike = types.InlineKeyboardButton("👎", callback_data=f"rate_{conv_id}_{partner_id}_-1")
-    markup.add(btn_like, btn_dislike)
-    return markup
 
 def add_to_waiting(user_id, search_gender):
     conn = sqlite3.connect('dating_bot.db')
@@ -207,8 +211,10 @@ def find_partner(user_id):
     user = get_user(user_id)
     if not user:
         return None, None
+
     search_for = user[4]
     my_gender = user[3]
+
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
     query = '''
@@ -223,6 +229,7 @@ def find_partner(user_id):
     '''
     cur.execute(query, (user_id, search_for, search_for, my_gender))
     row = cur.fetchone()
+
     if row:
         partner_id = row[0]
         cur.execute('DELETE FROM waiting_queue WHERE user_id IN (?, ?)', (user_id, partner_id))
@@ -288,7 +295,8 @@ def broadcast_message(text):
     cur.execute('SELECT user_id FROM users WHERE is_banned = 0')
     users = cur.fetchall()
     conn.close()
-    success, fail = 0, 0
+    success = 0
+    fail = 0
     for (user_id,) in users:
         try:
             bot.send_message(user_id, text)
@@ -310,6 +318,7 @@ def update_user_level(user_id):
         conn.commit()
     conn.close()
 
+# ===== ДЕКОРАТОР ПРОВЕРКИ АДМИНА =====
 def admin_only(func):
     def wrapper(message):
         if message.from_user.id != ADMIN_ID:
@@ -325,13 +334,15 @@ user_data = {}
 def cmd_start(message):
     user_id = message.from_user.id
     save_user(user_id, message.from_user.username, message.from_user.first_name)
+
     if is_user_banned(user_id):
         bot.reply_to(message, "🚫 Вы забанены и не можете пользоваться ботом.")
         return
+
     if is_profile_complete(user_id):
         show_main_menu(message.chat.id)
     else:
-        bot.send_message(user_id, "👋 Привет! Давай создадим твою анкету для анонимного общения.\n\nСколько тебе лет? (введи число)")
+        bot.send_message(user_id, "👋 Привет! Давай создадим твою анкету.\n\nСколько тебе лет? (введи число)")
         user_data[user_id] = {'step': 'age'}
 
 @bot.message_handler(func=lambda m: m.from_user.id in user_data and user_data[m.from_user.id]['step'] == 'age')
@@ -363,7 +374,7 @@ def process_gender(message):
     user_data[user_id]['step'] = 'search_gender'
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     markup.add('Парней', 'Девушек', 'Всех')
-    bot.send_message(user_id, "Кого ты хочешь искать для общения?", reply_markup=markup)
+    bot.send_message(user_id, "Кого ты хочешь искать?", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.from_user.id in user_data and user_data[m.from_user.id]['step'] == 'search_gender')
 def process_search_gender(message):
@@ -377,7 +388,7 @@ def process_search_gender(message):
         search = 'both'
     user_data[user_id]['search_gender'] = search
     user_data[user_id]['step'] = 'bio'
-    bot.send_message(user_id, "Напиши немного о себе (чем увлекаешься, что ищешь). Можно не более 300 символов.", reply_markup=types.ReplyKeyboardRemove())
+    bot.send_message(user_id, "Напиши немного о себе (до 300 символов).", reply_markup=types.ReplyKeyboardRemove())
 
 @bot.message_handler(func=lambda m: m.from_user.id in user_data and user_data[m.from_user.id]['step'] == 'bio')
 def process_bio(message):
@@ -387,7 +398,7 @@ def process_bio(message):
     user_data[user_id]['step'] = 'photo'
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     markup.add('Пропустить')
-    bot.send_message(user_id, "Отправь своё фото (необязательно, но повысит шансы на общение). Или нажми 'Пропустить'.", reply_markup=markup)
+    bot.send_message(user_id, "Отправь своё фото (необязательно) или нажми 'Пропустить'.", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.from_user.id in user_data and user_data[m.from_user.id]['step'] == 'photo', content_types=['photo', 'text'])
 def process_photo(message):
@@ -396,15 +407,8 @@ def process_photo(message):
     if message.content_type == 'photo':
         photo_id = message.photo[-1].file_id
     data = user_data.pop(user_id)
-    update_user_profile(
-        user_id,
-        data['age'],
-        data['gender'],
-        data['search_gender'],
-        data['bio'],
-        photo_id
-    )
-    bot.send_message(user_id, "✅ Анкета сохранена! Теперь ты можешь искать собеседников.", reply_markup=types.ReplyKeyboardRemove())
+    update_user_profile(user_id, data['age'], data['gender'], data['search_gender'], data['bio'], photo_id)
+    bot.send_message(user_id, "✅ Анкета сохранена!", reply_markup=types.ReplyKeyboardRemove())
     show_main_menu(user_id)
 
 def show_main_menu(chat_id):
@@ -415,6 +419,7 @@ def show_main_menu(chat_id):
     markup.add('🏆 Топ пользователей')
     bot.send_message(chat_id, "Главное меню:", reply_markup=markup)
 
+# ===== ПРОВЕРКА БАНА =====
 def is_user_banned(user_id):
     user = get_user(user_id)
     return user and user[10] == 1
@@ -437,13 +442,13 @@ def show_profile(message):
 Уровень: {user[12]}
 Рейтинг: {user[11]}
     """
-    # Пробуем отправить фото, если есть, но перехватываем ошибку
+    # Отправляем фото, если есть, но с защитой от ошибок
     if user[6]:
         try:
             bot.send_photo(user_id, user[6], caption=profile_text)
         except Exception as e:
-            logger.error(f"Ошибка отправки фото пользователю {user_id}: {e}")
-            bot.send_message(user_id, profile_text + "\n(Фото не удалось загрузить)")
+            logger.error(f"Ошибка отправки фото в профиле: {e}")
+            bot.send_message(user_id, profile_text + "\n\n(Фото не может быть отображено, возможно, оно устарело.)")
     else:
         bot.send_message(user_id, profile_text)
 
@@ -470,12 +475,12 @@ def cmd_search(message):
     bot.send_message(user_id, "🔍 Ищу собеседника...")
     partner_id, conv_id = find_partner(user_id)
     if partner_id:
-        bot.send_message(user_id, "✅ Собеседник найден! Можете общаться анонимно.\nОтправляй текст, фото, видео, стикеры.")
-        bot.send_message(partner_id, "✅ Собеседник найден! Можете общаться анонимно.\nОтправляй текст, фото, видео, стикеры.")
+        bot.send_message(user_id, "✅ Собеседник найден! Можете общаться.")
+        bot.send_message(partner_id, "✅ Собеседник найден! Можете общаться.")
     else:
         user = get_user(user_id)
         add_to_waiting(user_id, user[4])
-        bot.send_message(user_id, "🕒 Пока никого нет. Ты добавлен в очередь. Как только появится подходящий собеседник, я сообщу.")
+        bot.send_message(user_id, "🕒 Пока никого нет. Ты в очереди.")
 
 @bot.message_handler(func=lambda m: m.text == '⏹ Завершить диалог' or m.text == '/stop')
 def cmd_stop(message):
@@ -484,13 +489,8 @@ def cmd_stop(message):
     if not conv:
         bot.send_message(user_id, "❌ У тебя нет активного диалога.")
         return
-    partner_id = get_partner_id(user_id, conv)
     end_conversation(conv['id'], user_id)
     bot.send_message(user_id, "⏹ Диалог завершён.")
-    try:
-        bot.send_message(partner_id, "👋 Собеседник покинул чат. Диалог завершён.")
-    except:
-        pass
 
 @bot.message_handler(func=lambda m: m.text == '/next')
 def cmd_next(message):
@@ -502,7 +502,7 @@ def cmd_stats(message):
     total, banned, active, waiting = get_stats()
     stats_text = f"""
 📊 Статистика бота:
-👥 Всего пользователей: {total}
+👥 Всего: {total}
 🚫 Забанено: {banned}
 💬 Активных диалогов: {active}
 🕒 В очереди: {waiting}
@@ -567,6 +567,7 @@ def cmd_report(message):
 
 def process_report(message, conv_id, reporter_id, reported_id):
     reason = message.text[:500]
+    # Сохраняем последние 10 сообщений диалога
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
     cur.execute('''
@@ -603,6 +604,7 @@ def callback_rate(call):
     partner_id = int(partner_id)
     value = int(value)
     user_id = call.from_user.id
+
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
     cur.execute('SELECT rated_by_user1, rated_by_user2 FROM conversations WHERE id = ?', (conv_id,))
@@ -801,7 +803,31 @@ def view_report(message):
     """
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
-# ===== ОБРАБОТКА СООБЩЕНИЙ В ДИАЛОГЕ И ЛОГИРОВАНИЕ =====
+# Обработка ответов админа на жалобы
+@bot.message_handler(func=lambda m: m.reply_to_message and m.text.startswith('/ban'))
+@admin_only
+def admin_ban_from_report(message):
+    try:
+        parts = message.text.split()
+        if len(parts) >= 2:
+            user_id = int(parts[1])
+            reason = ' '.join(parts[2:]) if len(parts) > 2 else "Нарушение правил (по жалобе)"
+        else:
+            text = message.reply_to_message.text
+            import re
+            match = re.search(r'На:\s*(\d+)', text)
+            if match:
+                user_id = int(match.group(1))
+                reason = "Нарушение по жалобе"
+            else:
+                bot.reply_to(message, "❌ Не удалось определить ID пользователя.")
+                return
+        ban_user(user_id, reason, message.from_user.id)
+        bot.reply_to(message, f"✅ Пользователь {user_id} забанен.")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+# ===== ОБРАБОТКА СООБЩЕНИЙ В ДИАЛОГЕ =====
 @bot.message_handler(func=lambda m: True, content_types=['text', 'photo', 'video', 'sticker', 'voice', 'document'])
 def handle_chat_message(message):
     user_id = message.from_user.id
@@ -815,6 +841,8 @@ def handle_chat_message(message):
         bot.send_message(user_id, "❌ У тебя нет активного диалога. Найди собеседника в меню.")
         return
     partner_id = get_partner_id(user_id, conv)
+
+    # Логируем сообщение
     try:
         msg_text = message.text or message.caption or f"[{message.content_type}]"
         conn = sqlite3.connect('dating_bot.db')
@@ -827,6 +855,8 @@ def handle_chat_message(message):
         conn.close()
     except Exception as e:
         logger.error(f"Ошибка логирования: {e}")
+
+    # Пересылаем
     try:
         if message.content_type == 'text':
             bot.send_message(partner_id, f"💬 {message.text}")
@@ -843,7 +873,7 @@ def handle_chat_message(message):
         else:
             bot.send_message(partner_id, f"📦 Сообщение (тип: {message.content_type})")
     except Exception as e:
-        logger.error(f"Ошибка отправки сообщения от {user_id} к {partner_id}: {e}")
+        logger.error(f"Ошибка отправки: {e}")
         bot.send_message(user_id, "❌ Не удалось отправить сообщение. Возможно, собеседник покинул чат.")
         end_conversation(conv['id'])
 
@@ -854,6 +884,7 @@ if __name__ == '__main__':
     print("=" * 50)
     print(f"👑 Админ ID: {ADMIN_ID}")
     print("🟢 Запуск...")
+
     # Удаляем вебхук и запускаем polling
     bot.remove_webhook()
     time.sleep(1)
