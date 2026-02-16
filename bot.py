@@ -7,11 +7,11 @@ import time
 import os
 import math
 import re
+import json
 
 # ===== НАСТРОЙКИ =====
 TOKEN = '8494465153:AAGhNsVnNmDE0LTtSSh2A5GE013Wptw0tvw'  # твой токен
 ADMIN_ID = 1760627021     # твой ID
-PROVIDER_TOKEN = 'YOUR_PROVIDER_TOKEN'  # токен для платежей (получить у @BotFather)
 REFERRAL_BONUS = 20       # бонус за приглашённого друга (монет)
 REFERRAL_BONUS_FOR_NEW = 10  # бонус новому пользователю за регистрацию по рефералке
 
@@ -32,7 +32,7 @@ bot = telebot.TeleBot(TOKEN)
 def init_db():
     conn = sqlite3.connect('dating_bot.db', check_same_thread=False)
     cur = conn.cursor()
-    # Таблица пользователей (добавлены поля coins, last_bonus, referrer_id)
+    # Таблица пользователей
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -69,7 +69,7 @@ def init_db():
             reward_coins INTEGER
         )
     ''')
-    # Таблица полученных достижений пользователями
+    # Таблица полученных достижений
     cur.execute('''
         CREATE TABLE IF NOT EXISTS user_achievements (
             user_id INTEGER,
@@ -78,7 +78,7 @@ def init_db():
             PRIMARY KEY (user_id, achievement_id)
         )
     ''')
-    # Таблица для учёта наград за рефералов (чтобы не начислить дважды)
+    # Таблица для учёта наград за рефералов
     cur.execute('''
         CREATE TABLE IF NOT EXISTS referral_rewards (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,7 +145,7 @@ def init_db():
         )
     ''')
     conn.commit()
-    # Заполняем таблицу достижений, если пусто
+    # Заполняем достижения, если пусто
     cur.execute('SELECT COUNT(*) FROM achievements')
     if cur.fetchone()[0] == 0:
         achievements = [
@@ -183,32 +183,23 @@ def get_user(user_id):
 def save_user(user_id, username, first_name, referrer_id=None):
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
-    # Проверяем, существует ли уже пользователь
     cur.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
     if cur.fetchone():
-        # Пользователь уже есть, просто обновим last_active
         cur.execute('UPDATE users SET last_active = ? WHERE user_id = ?', (datetime.now(), user_id))
     else:
-        # Новый пользователь, вставляем с referrer_id
         cur.execute('''
             INSERT INTO users (user_id, username, first_name, reg_date, last_active, referrer_id)
             VALUES (?, ?, ?, ?, ?, ?)
         ''', (user_id, username, first_name, datetime.now(), datetime.now(), referrer_id))
-        # Если есть реферер, начисляем бонусы
         if referrer_id:
-            # Проверяем, не был ли уже начислен бонус за этого реферала
             cur.execute('SELECT 1 FROM referral_rewards WHERE referred_id = ?', (user_id,))
             if not cur.fetchone():
-                # Начисляем бонус рефереру
                 cur.execute('UPDATE users SET coins = coins + ? WHERE user_id = ?', (REFERRAL_BONUS, referrer_id))
-                # Начисляем бонус новому пользователю
                 cur.execute('UPDATE users SET coins = coins + ? WHERE user_id = ?', (REFERRAL_BONUS_FOR_NEW, user_id))
-                # Записываем факт начисления
                 cur.execute('''
                     INSERT INTO referral_rewards (referrer_id, referred_id, reward_coins, rewarded_at)
                     VALUES (?, ?, ?, ?)
                 ''', (referrer_id, user_id, REFERRAL_BONUS, datetime.now()))
-                # Уведомляем реферера (если можем)
                 try:
                     bot.send_message(referrer_id, f"🎉 По вашей реферальной ссылке зарегистрировался новый пользователь! Вам начислено {REFERRAL_BONUS} монет.")
                 except:
@@ -255,7 +246,6 @@ def get_partner_id(user_id, conv):
     return conv['user2_id'] if conv['user1_id'] == user_id else conv['user1_id']
 
 def end_conversation(conv_id):
-    """Завершает диалог и отправляет обоим пользователям клавиатуру с оценкой и жалобой"""
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
     cur.execute('SELECT user1_id, user2_id, rated_by_user1, rated_by_user2 FROM conversations WHERE id = ?', (conv_id,))
@@ -263,12 +253,10 @@ def end_conversation(conv_id):
     if row:
         user1, user2, rated1, rated2 = row
         cur.execute('UPDATE conversations SET is_active = 0, last_message_time = ? WHERE id = ?', (datetime.now(), conv_id))
-        # Увеличиваем счётчик диалогов у обоих пользователей
         cur.execute('UPDATE users SET total_conversations = total_conversations + 1 WHERE user_id IN (?, ?)', (user1, user2))
         conn.commit()
         conn.close()
 
-        # Проверяем достижения для обоих
         check_achievements(user1)
         check_achievements(user2)
 
@@ -423,13 +411,10 @@ def update_user_level(user_id):
     conn.close()
 
 def check_achievements(user_id):
-    """Проверяет и выдаёт достижения пользователю"""
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
-    # Получаем все достижения
     cur.execute('SELECT id, condition_type, condition_value, reward_coins FROM achievements')
     achievements = cur.fetchall()
-    # Получаем данные пользователя для проверки
     cur.execute('''
         SELECT total_conversations, total_likes, coins, last_bonus, photo_file_id
         FROM users WHERE user_id = ?
@@ -440,9 +425,7 @@ def check_achievements(user_id):
         return
     convs, likes, coins, last_bonus, photo = user_data
 
-    # Проверяем каждое достижение
     for ach_id, cond_type, cond_val, reward in achievements:
-        # Проверяем, получено ли уже
         cur.execute('SELECT 1 FROM user_achievements WHERE user_id = ? AND achievement_id = ?', (user_id, ach_id))
         if cur.fetchone():
             continue
@@ -456,14 +439,11 @@ def check_achievements(user_id):
         elif cond_type == 'photo':
             if photo:
                 unlocked = True
-        # Добавить другие условия по необходимости
 
         if unlocked:
-            # Начисляем награду
             cur.execute('UPDATE users SET coins = coins + ? WHERE user_id = ?', (reward, user_id))
             cur.execute('INSERT INTO user_achievements (user_id, achievement_id, unlocked_at) VALUES (?, ?, ?)',
                         (user_id, ach_id, datetime.now()))
-            # Уведомляем пользователя
             cur.execute('SELECT name, description FROM achievements WHERE id = ?', (ach_id,))
             name, desc = cur.fetchone()
             bot.send_message(user_id, f"🏆 Достижение разблокировано: {name}\n{desc}\n+{reward} монет!")
@@ -488,7 +468,6 @@ def cmd_start(message):
     args = message.text.split()
     referrer_id = None
     if len(args) > 1:
-        # Ожидается формат: /start ref_123456
         ref_param = args[1]
         if ref_param.startswith('ref_'):
             try:
@@ -596,7 +575,6 @@ def show_profile(message):
         return
     gender_str = {'male': 'Парень', 'female': 'Девушка', 'other': 'Другое'}.get(user[3], 'Не указан')
     search_str = {'male': 'Парней', 'female': 'Девушек', 'both': 'Всех'}.get(user[4], 'Не указано')
-    # Получаем количество рефералов
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
     cur.execute('SELECT COUNT(*) FROM users WHERE referrer_id = ?', (user_id,))
@@ -776,7 +754,6 @@ def cmd_bonus(message):
             bot.send_message(user_id, "❌ Ты уже получал бонус сегодня. Приходи завтра!")
             conn.close()
             return
-    # Начисляем бонус (10 монет)
     cur.execute('UPDATE users SET coins = coins + 10, last_bonus = ? WHERE user_id = ?', (datetime.now(), user_id))
     conn.commit()
     conn.close()
@@ -788,10 +765,8 @@ def cmd_generate_bio(message):
     user = get_user(user_id)
     if not user:
         return
-    # Простая генерация на основе пола и возраста
     gender_str = {'male': 'парень', 'female': 'девушка', 'other': 'человек'}.get(user[3], 'человек')
     age = user[2]
-    # Спрашиваем интересы
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     markup.add('Музыка', 'Спорт', 'Кино', 'Книги', 'Путешествия', 'Игры', 'Другое')
     msg = bot.send_message(user_id, "Выбери свои интересы (можно несколько, через запятую):", reply_markup=markup)
@@ -800,7 +775,6 @@ def cmd_generate_bio(message):
 def process_interests_for_bio(message, user_id, gender_str, age):
     interests = message.text
     bio = f"Привет! Я {gender_str}, мне {age} лет. Интересуюсь: {interests}. Буду рад(а) пообщаться!"
-    # Сохраняем в БД
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
     cur.execute('UPDATE users SET bio = ? WHERE user_id = ?', (bio, user_id))
@@ -809,17 +783,34 @@ def process_interests_for_bio(message, user_id, gender_str, age):
     bot.send_message(user_id, f"✅ Описание сгенерировано и сохранено:\n{bio}", reply_markup=types.ReplyKeyboardRemove())
     show_main_menu(user_id)
 
+# ===== ДОНАТЫ (Telegram Stars) =====
 @bot.message_handler(func=lambda m: m.text == '💰 Донат' or m.text == '/donate')
 def cmd_donate(message):
-    # Создаём инвойс на 50 звёзд (для примера)
-    bot.send_invoice(
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn10 = types.InlineKeyboardButton("10 ⭐️", callback_data="donate_10")
+    btn25 = types.InlineKeyboardButton("25 ⭐️", callback_data="donate_25")
+    btn50 = types.InlineKeyboardButton("50 ⭐️", callback_data="donate_50")
+    btn100 = types.InlineKeyboardButton("100 ⭐️", callback_data="donate_100")
+    markup.add(btn10, btn25, btn50, btn100)
+    bot.send_message(
         message.chat.id,
+        "💰 Выбери сумму доната в Telegram Stars:\n\n"
+        "Звёзды можно потратить внутри Telegram или вывести на свой кошелёк.",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('donate_'))
+def process_donate(call):
+    amount = int(call.data.split('_')[1])
+    prices = [types.LabeledPrice(label="XTR", amount=amount)]
+    bot.send_invoice(
+        call.message.chat.id,
         title='Поддержка бота',
-        description='Отправь донат, чтобы поддержать развитие бота',
+        description=f'Донат {amount} Telegram Stars',
         invoice_payload='donation_payload',
-        provider_token=PROVIDER_TOKEN,
-        currency='XTR',  # для Stars
-        prices=[types.LabeledPrice(label='Донат', amount=50)],  # 50 звёзд
+        provider_token='',  # Для Stars оставляем пустым!
+        currency='XTR',
+        prices=prices,
         start_parameter='donate',
         need_name=False,
         need_phone_number=False,
@@ -827,38 +818,34 @@ def cmd_donate(message):
         need_shipping_address=False,
         is_flexible=False
     )
+    bot.answer_callback_query(call.id)
 
 @bot.pre_checkout_query_handler(func=lambda query: True)
 def pre_checkout_query(query):
-    # Обязательно подтверждаем
     bot.answer_pre_checkout_query(query.id, ok=True)
 
 @bot.message_handler(content_types=['successful_payment'])
 def successful_payment(message):
     user_id = message.from_user.id
-    # Начисляем бонус за донат (например, +100 монет)
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
     cur.execute('UPDATE users SET coins = coins + 100 WHERE user_id = ?', (user_id,))
     conn.commit()
     conn.close()
     bot.send_message(user_id, "✅ Спасибо за поддержку! Тебе начислено 100 монет.")
-    # Проверяем достижение "Благодетель"
     check_achievements(user_id)
 
+# ===== РЕФЕРАЛЫ =====
 @bot.message_handler(func=lambda m: m.text == '🤝 Рефералы' or m.text == '/referral')
 def cmd_referral(message):
     user_id = message.from_user.id
-    # Получаем количество рефералов
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
     cur.execute('SELECT COUNT(*) FROM users WHERE referrer_id = ?', (user_id,))
     referrals_count = cur.fetchone()[0]
-    # Получаем сумму заработанных монет по реферальной программе
     cur.execute('SELECT SUM(reward_coins) FROM referral_rewards WHERE referrer_id = ?', (user_id,))
     earned = cur.fetchone()[0] or 0
     conn.close()
-    # Генерируем реферальную ссылку
     bot_username = bot.get_me().username
     ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
     text = f"""
@@ -917,7 +904,6 @@ def callback_rate(call):
             cur.execute('UPDATE conversations SET rated_by_user2 = 1 WHERE id = ?', (conv_id,))
         conn.commit()
         update_user_level(partner_id)
-        # Проверяем достижения для оцениваемого
         check_achievements(partner_id)
         bot.answer_callback_query(call.id, "Спасибо за оценку!")
         bot.edit_message_text("Оценка учтена. Спасибо!", call.message.chat.id, call.message.message_id)
@@ -931,7 +917,6 @@ def callback_report_start(call):
     conv_id = int(conv_id)
     reported_id = int(reported_id)
     reporter_id = call.from_user.id
-
     user_data[reporter_id] = {
         'step': 'report_reason',
         'conv_id': conv_id,
@@ -944,7 +929,6 @@ def callback_report_start(call):
 def process_report_reason(message):
     user_id = message.from_user.id
     reason = message.text[:500]
-
     data = user_data.pop(user_id)
     conv_id = data['conv_id']
     reported_id = data['reported_id']
@@ -980,7 +964,6 @@ def process_report_reason(message):
     """
     bot.send_message(ADMIN_ID, admin_msg, parse_mode='Markdown')
     bot.send_message(user_id, "✅ Жалоба отправлена администратору. Спасибо!")
-    # Проверяем достижение "Модератор"
     check_achievements(user_id)
 
 # ===== АДМИН-ПАНЕЛЬ =====
@@ -1082,7 +1065,6 @@ def broadcast_command(message):
     if not text:
         bot.reply_to(message, "❌ Введи текст рассылки: /broadcast [текст]")
         return
-    # Добавляем префикс "от администратора"
     admin_text = "📢 Сообщение от администратора:\n\n" + text
     bot.reply_to(message, "⏳ Начинаю рассылку...")
     success, fail = broadcast_message(admin_text)
@@ -1197,7 +1179,6 @@ def handle_chat_message(message):
         return
     partner_id = get_partner_id(user_id, conv)
 
-    # Логируем сообщение
     try:
         msg_text = message.text or message.caption or f"[{message.content_type}]"
         conn = sqlite3.connect('dating_bot.db')
@@ -1211,7 +1192,6 @@ def handle_chat_message(message):
     except Exception as e:
         logger.error(f"Ошибка логирования: {e}")
 
-    # Пересылаем
     try:
         if message.content_type == 'text':
             bot.send_message(partner_id, f"💬 {message.text}")
@@ -1235,7 +1215,7 @@ def handle_chat_message(message):
 # ===== ЗАПУСК =====
 if __name__ == '__main__':
     print("=" * 50)
-    print("🤖 Анонимный чат-бот с реферальной программой")
+    print("🤖 Анонимный чат-бот с донатами через Stars")
     print("=" * 50)
     print(f"👑 Админ ID: {ADMIN_ID}")
     print("🟢 Запуск...")
