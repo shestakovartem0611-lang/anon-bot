@@ -38,6 +38,7 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
+    # Таблица пользователей
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -63,6 +64,7 @@ def init_db():
             referrer_id INTEGER DEFAULT NULL
         )
     ''')
+    # Таблица достижений
     cur.execute('''
         CREATE TABLE IF NOT EXISTS achievements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,6 +145,7 @@ def init_db():
     ''')
     conn.commit()
 
+    # Заполняем достижения, если пусто
     cur.execute('SELECT COUNT(*) FROM achievements')
     if cur.fetchone()[0] == 0:
         achievements = [
@@ -443,7 +446,7 @@ def check_achievements(user_id):
     conn.commit()
     conn.close()
 
-# ===== ДЕКОРАТОР АДМИНА (определяем РАНЬШЕ всех команд) =====
+# ===== ДЕКОРАТОР АДМИНА =====
 def admin_only(func):
     def wrapper(message):
         if message.from_user.id != ADMIN_ID:
@@ -953,7 +956,7 @@ def process_report_reason(message):
     bot.send_message(user_id, "✅ Жалоба отправлена администратору. Спасибо!")
     check_achievements(user_id)
 
-# ===== НОВАЯ КОМАНДА: ОТПРАВКА СООБЩЕНИЯ КОНКРЕТНОМУ ПОЛЬЗОВАТЕЛЮ =====
+# ===== КОМАНДА ОТПРАВКИ СООБЩЕНИЯ ПОЛЬЗОВАТЕЛЮ С ВОЗМОЖНОСТЬЮ ОТВЕТА =====
 @bot.message_handler(commands=['sendto'])
 @admin_only
 def cmd_sendto(message):
@@ -972,12 +975,36 @@ def cmd_sendto(message):
         bot.reply_to(message, f"❌ Пользователь с ID {target_id} не найден в базе.")
         return
     try:
-        bot.send_message(target_id, f"📨 Сообщение от администратора:\n\n{text}")
+        # Создаём клавиатуру с кнопкой ответа
+        markup = types.InlineKeyboardMarkup()
+        btn = types.InlineKeyboardButton("✉️ Ответить администратору", callback_data=f"reply_{target_id}")
+        markup.add(btn)
+        bot.send_message(target_id, f"📨 Сообщение от администратора:\n\n{text}", reply_markup=markup)
         bot.reply_to(message, f"✅ Сообщение отправлено пользователю {target_id}.")
     except Exception as e:
         bot.reply_to(message, f"❌ Не удалось отправить сообщение: {e}")
 
-# ===== АДМИН-ПАНЕЛЬ (обновлена) =====
+# ===== ОБРАБОТЧИК ДЛЯ КНОПКИ "ОТВЕТИТЬ АДМИНИСТРАТОРУ" =====
+@bot.callback_query_handler(func=lambda call: call.data.startswith('reply_'))
+def callback_reply_to_admin(call):
+    # Запускает процесс ответа администратору
+    user_id = call.from_user.id
+    user_data[user_id] = {'step': 'reply_to_admin'}
+    bot.send_message(user_id, "Напиши свой ответ администратору (одним сообщением):")
+    bot.answer_callback_query(call.id)
+
+@bot.message_handler(func=lambda m: m.from_user.id in user_data and user_data[m.from_user.id].get('step') == 'reply_to_admin')
+def process_reply_to_admin(message):
+    user_id = message.from_user.id
+    reply_text = message.text[:500]
+    user = get_user(user_id)
+    name = user['first_name'] or user['username'] or f"Пользователь {user_id}"
+    admin_msg = f"📨 Ответ от пользователя {name} (ID: {user_id}):\n\n{reply_text}"
+    bot.send_message(ADMIN_ID, admin_msg)
+    bot.send_message(user_id, "✅ Твой ответ отправлен администратору.")
+    user_data.pop(user_id, None)
+
+# ===== АДМИН-ПАНЕЛЬ =====
 @bot.message_handler(commands=['admin'])
 @admin_only
 def admin_panel(message):
@@ -1221,10 +1248,10 @@ def handle_chat_message(message):
 # ===== ЗАПУСК =====
 if __name__ == '__main__':
     print("=" * 50)
-    print("🤖 Анонимный чат-бот с командой /sendto")
+    print("🤖 Анонимный чат-бот с ответом администратору")
     print("=" * 50)
     print(f"👑 Админ ID: {ADMIN_ID}")
     print("🟢 Запуск...")
     bot.remove_webhook()
     time.sleep(1)
-    bot.infinity_polling()
+    bot.infinity_polling()        
