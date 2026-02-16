@@ -15,6 +15,9 @@ ADMIN_ID = 1760627021     # твой ID
 REFERRAL_BONUS = 20       # бонус за приглашённого друга (монет)
 REFERRAL_BONUS_FOR_NEW = 10  # бонус новому пользователю за регистрацию по рефералке
 
+# Список доступных сумм для донатов (можешь менять)
+DONATION_AMOUNTS = [5, 10, 20, 50, 100, 200]
+
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -32,16 +35,16 @@ bot = telebot.TeleBot(TOKEN)
 def init_db():
     conn = sqlite3.connect('dating_bot.db', check_same_thread=False)
     cur = conn.cursor()
-    # Таблица пользователей
+    # Таблица пользователей с полями по умолчанию
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
             first_name TEXT,
-            age INTEGER,
-            gender TEXT,
-            search_gender TEXT,
-            bio TEXT,
+            age INTEGER DEFAULT 0,
+            gender TEXT DEFAULT 'не указан',
+            search_gender TEXT DEFAULT 'both',
+            bio TEXT DEFAULT '',
             photo_file_id TEXT,
             reg_date TIMESTAMP,
             last_active TIMESTAMP,
@@ -153,7 +156,7 @@ def init_db():
             ('Болтун', 'Провести 10 диалогов', 'conversations', 10, 20),
             ('Звезда', 'Получить 10 лайков', 'likes', 10, 15),
             ('Популярный', 'Получить 50 лайков', 'likes', 50, 50),
-            ('Джентльмен', 'Получить 5 комплиментов (лайков подряд?)', 'consecutive_likes', 5, 10),
+            ('Джентльмен', 'Получить 5 комплиментов', 'consecutive_likes', 5, 10),
             ('Завсегдатай', 'Заходить 7 дней подряд', 'streak_days', 7, 30),
             ('Фотогеничный', 'Загрузить фото', 'photo', 1, 5),
             ('Душа компании', 'Провести 5 диалогов за день', 'daily_conversations', 5, 25),
@@ -173,6 +176,7 @@ init_db()
 
 # ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
 def get_user(user_id):
+    """Возвращает пользователя или None, с обработкой ошибок"""
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
     cur.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
@@ -181,6 +185,7 @@ def get_user(user_id):
     return user
 
 def save_user(user_id, username, first_name, referrer_id=None):
+    """Сохраняет нового пользователя или обновляет время активности"""
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
     cur.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
@@ -208,6 +213,7 @@ def save_user(user_id, username, first_name, referrer_id=None):
     conn.close()
 
 def update_user_profile(user_id, age, gender, search_gender, bio, photo_file_id=None):
+    """Обновляет анкету пользователя"""
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
     if photo_file_id:
@@ -224,12 +230,19 @@ def update_user_profile(user_id, age, gender, search_gender, bio, photo_file_id=
     conn.close()
 
 def is_profile_complete(user_id):
+    """Проверяет, заполнены ли основные поля анкеты"""
     user = get_user(user_id)
     if not user:
         return False
-    return all([user[2], user[3], user[4], user[5]])
+    # Индексы полей: age (2), gender (3), search_gender (4), bio (5)
+    # Проверяем, что они не пустые и не равны значениям по умолчанию
+    return (user[2] and user[2] != 0 and 
+            user[3] and user[3] != 'не указан' and 
+            user[4] and user[4] != 'both' and 
+            user[5] and user[5] != '')
 
 def get_active_conversation(user_id):
+    """Возвращает активный диалог пользователя"""
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
     cur.execute('''
@@ -246,6 +259,7 @@ def get_partner_id(user_id, conv):
     return conv['user2_id'] if conv['user1_id'] == user_id else conv['user1_id']
 
 def end_conversation(conv_id):
+    """Завершает диалог и отправляет оценку/жалобу обоим"""
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
     cur.execute('SELECT user1_id, user2_id, rated_by_user1, rated_by_user2 FROM conversations WHERE id = ?', (conv_id,))
@@ -300,12 +314,13 @@ def remove_from_waiting(user_id):
     conn.close()
 
 def find_partner(user_id):
+    """Поиск подходящего собеседника"""
     user = get_user(user_id)
     if not user:
         return None, None
 
-    search_for = user[4]
-    my_gender = user[3]
+    search_for = user[4]  # search_gender
+    my_gender = user[3]   # gender
 
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
@@ -411,6 +426,7 @@ def update_user_level(user_id):
     conn.close()
 
 def check_achievements(user_id):
+    """Проверка и выдача достижений"""
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
     cur.execute('SELECT id, condition_type, condition_value, reward_coins FROM achievements')
@@ -439,6 +455,7 @@ def check_achievements(user_id):
         elif cond_type == 'photo':
             if photo:
                 unlocked = True
+        # Другие условия можно добавить по аналогии
 
         if unlocked:
             cur.execute('UPDATE users SET coins = coins + ? WHERE user_id = ?', (reward, user_id))
@@ -572,29 +589,43 @@ def show_profile(message):
     user_id = message.from_user.id
     user = get_user(user_id)
     if not user:
+        bot.send_message(user_id, "❌ Профиль не найден. Напиши /start для регистрации.")
         return
-    gender_str = {'male': 'Парень', 'female': 'Девушка', 'other': 'Другое'}.get(user[3], 'Не указан')
-    search_str = {'male': 'Парней', 'female': 'Девушек', 'both': 'Всех'}.get(user[4], 'Не указано')
+    # Безопасное получение значений с подстановкой значений по умолчанию
+    age = user[2] if user[2] else 'не указан'
+    gender = user[3] if user[3] else 'не указан'
+    search_gender = user[4] if user[4] else 'не указано'
+    bio = user[5] if user[5] else 'не заполнено'
+    level = user[12] if user[12] is not None else 1
+    rating = user[11] if user[11] is not None else 0
+    coins = user[18] if user[18] is not None else 0
+
+    # Преобразование кодов пола в читаемый вид
+    gender_str = {'male': 'Парень', 'female': 'Девушка', 'other': 'Другое'}.get(gender, str(gender))
+    search_str = {'male': 'Парней', 'female': 'Девушек', 'both': 'Всех'}.get(search_gender, str(search_gender))
+
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
     cur.execute('SELECT COUNT(*) FROM users WHERE referrer_id = ?', (user_id,))
     referrals_count = cur.fetchone()[0]
     conn.close()
+
     profile_text = f"""
 👤 Твоя анкета:
-Возраст: {user[2]}
+Возраст: {age}
 Пол: {gender_str}
 Ищу: {search_str}
-О себе: {user[5]}
-Уровень: {user[12]}
-Рейтинг: {user[11]}
-Монеты: {user[18]}
+О себе: {bio}
+Уровень: {level}
+Рейтинг: {rating}
+Монеты: {coins}
 Приглашено друзей: {referrals_count}
     """
     if user[6]:
         try:
             bot.send_photo(user_id, user[6], caption=profile_text)
-        except:
+        except Exception as e:
+            logger.error(f"Ошибка отправки фото: {e}")
             bot.send_message(user_id, profile_text + "\n\n(Фото не может быть отображено, возможно, оно устарело.)")
     else:
         bot.send_message(user_id, profile_text)
@@ -649,7 +680,7 @@ def cmd_stats(message):
     total, banned, active, waiting = get_stats()
     stats_text = f"""
 📊 Статистика бота:
-👥 Всего: {total}
+👥 Всего пользователей: {total}
 🚫 Забанено: {banned}
 💬 Активных диалогов: {active}
 🕒 В очереди: {waiting}
@@ -680,9 +711,9 @@ def cmd_mystats(message):
 👥 Диалогов: {total_dialogs}
 👍 Лайков: {likes}
 👎 Дизлайков: {dislikes}
-⭐ Рейтинг: {user[11]}
-📊 Уровень: {user[12]}
-🪙 Монеты: {user[18]}
+⭐ Рейтинг: {user[11] if user[11] is not None else 0}
+📊 Уровень: {user[12] if user[12] is not None else 1}
+🪙 Монеты: {user[18] if user[18] is not None else 0}
 🏆 Достижений: {achievements_count}
 👥 Приглашено: {referrals}
     """
@@ -730,12 +761,13 @@ def callback_top(call):
         return
     text = f"🏆 Топ-10 по {category}:\n\n"
     for i, (uid, name, val1, val2) in enumerate(top, 1):
+        name = name or "Без имени"
         if category == 'rating':
-            text += f"{i}. {name or 'Без имени'} — рейтинг {val1}, уровень {val2}\n"
+            text += f"{i}. {name} — рейтинг {val1}, уровень {val2}\n"
         elif category == 'coins':
-            text += f"{i}. {name or 'Без имени'} — монет {val1}, уровень {val2}\n"
+            text += f"{i}. {name} — монет {val1}, уровень {val2}\n"
         elif category == 'level':
-            text += f"{i}. {name or 'Без имени'} — уровень {val1}, рейтинг {val2}\n"
+            text += f"{i}. {name} — уровень {val1}, рейтинг {val2}\n"
     bot.send_message(call.message.chat.id, text)
     bot.answer_callback_query(call.id)
 
@@ -749,7 +781,10 @@ def cmd_bonus(message):
     last_bonus = row[0]
     today = datetime.now().date()
     if last_bonus:
-        last_date = datetime.fromisoformat(last_bonus).date()
+        try:
+            last_date = datetime.fromisoformat(last_bonus).date()
+        except:
+            last_date = None
         if last_date == today:
             bot.send_message(user_id, "❌ Ты уже получал бонус сегодня. Приходи завтра!")
             conn.close()
@@ -766,7 +801,7 @@ def cmd_generate_bio(message):
     if not user:
         return
     gender_str = {'male': 'парень', 'female': 'девушка', 'other': 'человек'}.get(user[3], 'человек')
-    age = user[2]
+    age = user[2] if user[2] else '?'
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     markup.add('Музыка', 'Спорт', 'Кино', 'Книги', 'Путешествия', 'Игры', 'Другое')
     msg = bot.send_message(user_id, "Выбери свои интересы (можно несколько, через запятую):", reply_markup=markup)
@@ -786,16 +821,16 @@ def process_interests_for_bio(message, user_id, gender_str, age):
 # ===== ДОНАТЫ (Telegram Stars) =====
 @bot.message_handler(func=lambda m: m.text == '💰 Донат' or m.text == '/donate')
 def cmd_donate(message):
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    btn10 = types.InlineKeyboardButton("10 ⭐️", callback_data="donate_10")
-    btn25 = types.InlineKeyboardButton("25 ⭐️", callback_data="donate_25")
-    btn50 = types.InlineKeyboardButton("50 ⭐️", callback_data="donate_50")
-    btn100 = types.InlineKeyboardButton("100 ⭐️", callback_data="donate_100")
-    markup.add(btn10, btn25, btn50, btn100)
+    markup = types.InlineKeyboardMarkup(row_width=3)
+    buttons = []
+    for amount in DONATION_AMOUNTS:
+        buttons.append(types.InlineKeyboardButton(f"{amount} ⭐️", callback_data=f"donate_{amount}"))
+    markup.add(*buttons)
     bot.send_message(
         message.chat.id,
         "💰 Выбери сумму доната в Telegram Stars:\n\n"
-        "Звёзды можно потратить внутри Telegram или вывести на свой кошелёк.",
+        "Звёзды можно потратить внутри Telegram или вывести на свой кошелёк.\n"
+        f"Доступные суммы: {', '.join(map(str, DONATION_AMOUNTS))} ⭐️",
         reply_markup=markup
     )
 
@@ -827,12 +862,14 @@ def pre_checkout_query(query):
 @bot.message_handler(content_types=['successful_payment'])
 def successful_payment(message):
     user_id = message.from_user.id
+    total_amount = message.successful_payment.total_amount
+    bonus_coins = total_amount * 2  # например, 2 монеты за 1 звезду
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
-    cur.execute('UPDATE users SET coins = coins + 100 WHERE user_id = ?', (user_id,))
+    cur.execute('UPDATE users SET coins = coins + ? WHERE user_id = ?', (bonus_coins, user_id))
     conn.commit()
     conn.close()
-    bot.send_message(user_id, "✅ Спасибо за поддержку! Тебе начислено 100 монет.")
+    bot.send_message(user_id, f"✅ Спасибо за поддержку! Тебе начислено {bonus_coins} монет.")
     check_achievements(user_id)
 
 # ===== РЕФЕРАЛЫ =====
@@ -1002,7 +1039,7 @@ def admin_stats(message):
     conn.close()
     text = f"""
 📈 **Детальная статистика**
-👥 Всего: {total}
+👥 Всего пользователей: {total}
 🚫 Забанено: {banned}
 💬 Активных диалогов: {active}
 🕒 В очереди: {waiting}
