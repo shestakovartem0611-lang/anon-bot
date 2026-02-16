@@ -38,7 +38,6 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
-    # Таблица пользователей
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -64,7 +63,6 @@ def init_db():
             referrer_id INTEGER DEFAULT NULL
         )
     ''')
-    # Таблица достижений
     cur.execute('''
         CREATE TABLE IF NOT EXISTS achievements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,7 +143,6 @@ def init_db():
     ''')
     conn.commit()
 
-    # Заполняем достижения, если пусто
     cur.execute('SELECT COUNT(*) FROM achievements')
     if cur.fetchone()[0] == 0:
         achievements = [
@@ -445,6 +442,352 @@ def check_achievements(user_id):
             bot.send_message(user_id, f"🏆 Достижение разблокировано: {name_row['name']}\n{name_row['description']}\n+{reward} монет!")
     conn.commit()
     conn.close()
+
+# ===== ДЕКОРАТОР АДМИНА (определяем РАНЬШЕ всех команд) =====
+def admin_only(func):
+    def wrapper(message):
+        if message.from_user.id != ADMIN_ID:
+            bot.reply_to(message, "🚫 Эта команда только для администратора.")
+            return
+        return func(message)
+    return wrapper
+
+# ===== РЕГИСТРАЦИЯ АНКЕТЫ =====
+user_data = {}
+
+@bot.message_handler(commands=['start'])
+def cmd_start(message):
+    user_id = message.from_user.id
+    args = message.text.split()
+    referrer_id = None
+    if len(args) > 1 and args[1].startswith('ref_'):
+        try:
+            referrer_id = int(args[1].split('_')[1])
+        except:
+            pass
+    save_user(user_id, message.from_user.username, message.from_user.first_name, referrer_id)
+    if is_user_banned(user_id):
+        bot.reply_to(message, "🚫 Вы забанены и не можете пользоваться ботом.")
+        return
+    if is_profile_complete(user_id):
+        show_main_menu(message.chat.id)
+    else:
+        bot.send_message(user_id, "👋 Привет! Давай создадим твою анкету.\n\nСколько тебе лет? (введи число)")
+        user_data[user_id] = {'step': 'age'}
+
+@bot.message_handler(func=lambda m: m.from_user.id in user_data and user_data[m.from_user.id]['step'] == 'age')
+def process_age(message):
+    user_id = message.from_user.id
+    try:
+        age = int(message.text)
+        if age < 12 or age > 100:
+            raise ValueError
+        user_data[user_id]['age'] = age
+        user_data[user_id]['step'] = 'gender'
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        markup.add('Парень', 'Девушка', 'Другое')
+        bot.send_message(user_id, "Выбери свой пол:", reply_markup=markup)
+    except:
+        bot.send_message(user_id, "❌ Пожалуйста, введи число от 12 до 100.")
+
+@bot.message_handler(func=lambda m: m.from_user.id in user_data and user_data[m.from_user.id]['step'] == 'gender')
+def process_gender(message):
+    user_id = message.from_user.id
+    text = message.text.lower()
+    if 'парень' in text:
+        gender = 'male'
+    elif 'девушк' in text:
+        gender = 'female'
+    else:
+        gender = 'other'
+    user_data[user_id]['gender'] = gender
+    user_data[user_id]['step'] = 'search_gender'
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    markup.add('Парней', 'Девушек', 'Всех')
+    bot.send_message(user_id, "Кого ты хочешь искать?", reply_markup=markup)
+
+@bot.message_handler(func=lambda m: m.from_user.id in user_data and user_data[m.from_user.id]['step'] == 'search_gender')
+def process_search_gender(message):
+    user_id = message.from_user.id
+    text = message.text.lower()
+    if 'парн' in text:
+        search = 'male'
+    elif 'девуш' in text:
+        search = 'female'
+    else:
+        search = 'both'
+    user_data[user_id]['search_gender'] = search
+    user_data[user_id]['step'] = 'bio'
+    bot.send_message(user_id, "Напиши немного о себе (до 300 символов).", reply_markup=types.ReplyKeyboardRemove())
+
+@bot.message_handler(func=lambda m: m.from_user.id in user_data and user_data[m.from_user.id]['step'] == 'bio')
+def process_bio(message):
+    user_id = message.from_user.id
+    bio = message.text[:300]
+    user_data[user_id]['bio'] = bio
+    user_data[user_id]['step'] = 'photo'
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    markup.add('Пропустить')
+    bot.send_message(user_id, "Отправь своё фото (необязательно) или нажми 'Пропустить'.", reply_markup=markup)
+
+@bot.message_handler(func=lambda m: m.from_user.id in user_data and user_data[m.from_user.id]['step'] == 'photo', content_types=['photo', 'text'])
+def process_photo(message):
+    user_id = message.from_user.id
+    photo_id = None
+    if message.content_type == 'photo':
+        photo_id = message.photo[-1].file_id
+    data = user_data.pop(user_id)
+    update_user_profile(user_id, data['age'], data['gender'], data['search_gender'], data['bio'], photo_id)
+    bot.send_message(user_id, "✅ Анкета сохранена!", reply_markup=types.ReplyKeyboardRemove())
+    show_main_menu(user_id)
+
+def show_main_menu(chat_id):
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add('🔍 Найти собеседника', '⏹ Завершить диалог')
+    markup.add('👤 Моя анкета', '✏ Редактировать анкету')
+    markup.add('📊 Статистика', '📈 Моя статистика')
+    markup.add('🏆 Топ', '🎁 Бонус', '✨ Сгенерировать описание')
+    markup.add('💰 Донат', '🤝 Рефералы')
+    bot.send_message(chat_id, "Главное меню:", reply_markup=markup)
+
+def is_user_banned(user_id):
+    user = get_user(user_id)
+    return user and user['is_banned'] == 1
+
+# ===== КОМАНДЫ ПОЛЬЗОВАТЕЛЯ =====
+@bot.message_handler(func=lambda m: m.text == '👤 Моя анкета')
+def show_profile(message):
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    if not user:
+        bot.send_message(user_id, "❌ Профиль не найден. Напиши /start.")
+        return
+    age = user['age'] if user['age'] else 'не указан'
+    gender = user['gender'] if user['gender'] else 'не указан'
+    search_gender = user['search_gender'] if user['search_gender'] else 'не указано'
+    bio = user['bio'] if user['bio'] else 'не заполнено'
+    level = user['level'] if user['level'] is not None else 1
+    rating = user['rating'] if user['rating'] is not None else 0
+    coins = user['coins'] if user['coins'] is not None else 0
+
+    gender_str = {'male': 'Парень', 'female': 'Девушка', 'other': 'Другое'}.get(gender, str(gender))
+    search_str = {'male': 'Парней', 'female': 'Девушек', 'both': 'Всех'}.get(search_gender, str(search_gender))
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('SELECT COUNT(*) FROM users WHERE referrer_id = ?', (user_id,))
+    referrals_count = cur.fetchone()[0]
+    conn.close()
+
+    profile_text = f"""
+👤 Твоя анкета:
+Возраст: {age}
+Пол: {gender_str}
+Ищу: {search_str}
+О себе: {bio}
+Уровень: {level}
+Рейтинг: {rating}
+Монеты: {coins}
+Приглашено друзей: {referrals_count}
+    """
+    if user['photo_file_id']:
+        try:
+            bot.send_photo(user_id, user['photo_file_id'], caption=profile_text)
+        except Exception as e:
+            logger.error(f"Ошибка фото: {e}")
+            bot.send_message(user_id, profile_text + "\n\n(Фото не может быть отображено.)")
+    else:
+        bot.send_message(user_id, profile_text)
+
+@bot.message_handler(func=lambda m: m.text == '✏ Редактировать анкету')
+def edit_profile(message):
+    user_id = message.from_user.id
+    bot.send_message(user_id, "Давай создадим новую анкету.")
+    user_data[user_id] = {'step': 'age'}
+    bot.send_message(user_id, "Сколько тебе лет?")
+
+@bot.message_handler(func=lambda m: m.text == '🔍 Найти собеседника' or m.text == '/search')
+def cmd_search(message):
+    user_id = message.from_user.id
+    if is_user_banned(user_id):
+        bot.reply_to(message, "🚫 Вы забанены.")
+        return
+    if not is_profile_complete(user_id):
+        bot.send_message(user_id, "Сначала заполни анкету: /start")
+        return
+    conv = get_active_conversation(user_id)
+    if conv:
+        bot.send_message(user_id, "⚠️ У тебя уже есть активный диалог. Заверши его командой /stop")
+        return
+    bot.send_message(user_id, "🔍 Ищу собеседника...")
+    partner_id, conv_id = find_partner(user_id)
+    if partner_id:
+        bot.send_message(user_id, "✅ Собеседник найден! Можете общаться.")
+        bot.send_message(partner_id, "✅ Собеседник найден! Можете общаться.")
+    else:
+        user = get_user(user_id)
+        add_to_waiting(user_id, user['search_gender'])
+        bot.send_message(user_id, "🕒 Пока никого нет. Ты в очереди.")
+
+@bot.message_handler(func=lambda m: m.text == '⏹ Завершить диалог' or m.text == '/stop')
+def cmd_stop(message):
+    user_id = message.from_user.id
+    conv = get_active_conversation(user_id)
+    if not conv:
+        bot.send_message(user_id, "❌ У тебя нет активного диалога.")
+        return
+    end_conversation(conv['id'])
+    bot.send_message(user_id, "⏹ Диалог завершён.")
+
+@bot.message_handler(func=lambda m: m.text == '/next')
+def cmd_next(message):
+    cmd_stop(message)
+    cmd_search(message)
+
+@bot.message_handler(func=lambda m: m.text == '📊 Статистика' or m.text == '/stats')
+def cmd_stats(message):
+    total, banned, active, waiting = get_stats()
+    stats_text = f"""
+📊 Статистика бота:
+👥 Всего пользователей: {total}
+🚫 Забанено: {banned}
+💬 Активных диалогов: {active}
+🕒 В очереди: {waiting}
+    """
+    bot.send_message(message.chat.id, stats_text)
+
+@bot.message_handler(func=lambda m: m.text == '📈 Моя статистика' or m.text == '/mystats')
+def cmd_mystats(message):
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    if not user:
+        return
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('SELECT COUNT(*) FROM conversations WHERE (user1_id = ? OR user2_id = ?) AND is_active = 0', (user_id, user_id))
+    total_dialogs = cur.fetchone()[0]
+    cur.execute('SELECT COUNT(*) FROM ratings WHERE to_user = ? AND value = 1', (user_id,))
+    likes = cur.fetchone()[0]
+    cur.execute('SELECT COUNT(*) FROM ratings WHERE to_user = ? AND value = -1', (user_id,))
+    dislikes = cur.fetchone()[0]
+    cur.execute('SELECT COUNT(*) FROM user_achievements WHERE user_id = ?', (user_id,))
+    achievements_count = cur.fetchone()[0]
+    cur.execute('SELECT COUNT(*) FROM users WHERE referrer_id = ?', (user_id,))
+    referrals = cur.fetchone()[0]
+    conn.close()
+    text = f"""
+📈 Твоя статистика:
+👥 Диалогов: {total_dialogs}
+👍 Лайков: {likes}
+👎 Дизлайков: {dislikes}
+⭐ Рейтинг: {user['rating'] if user['rating'] is not None else 0}
+📊 Уровень: {user['level'] if user['level'] is not None else 1}
+🪙 Монеты: {user['coins'] if user['coins'] is not None else 0}
+🏆 Достижений: {achievements_count}
+👥 Приглашено: {referrals}
+    """
+    bot.send_message(message.chat.id, text)
+
+@bot.message_handler(func=lambda m: m.text == '🏆 Топ' or m.text == '/top')
+def cmd_top_menu(message):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("По рейтингу", callback_data="top_rating"),
+        types.InlineKeyboardButton("По монетам", callback_data="top_coins"),
+        types.InlineKeyboardButton("По уровню", callback_data="top_level")
+    )
+    bot.send_message(message.chat.id, "Выбери категорию топа:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('top_'))
+def callback_top(call):
+    category = call.data.split('_')[1]
+    conn = get_db_connection()
+    cur = conn.cursor()
+    if category == 'rating':
+        cur.execute('''
+            SELECT user_id, first_name, rating, level FROM users
+            WHERE is_banned = 0 AND rating > 0
+            ORDER BY rating DESC, level DESC
+            LIMIT 10
+        ''')
+    elif category == 'coins':
+        cur.execute('''
+            SELECT user_id, first_name, coins, level FROM users
+            WHERE is_banned = 0 AND coins > 0
+            ORDER BY coins DESC, level DESC
+            LIMIT 10
+        ''')
+    elif category == 'level':
+        cur.execute('''
+            SELECT user_id, first_name, level, rating FROM users
+            WHERE is_banned = 0
+            ORDER BY level DESC, rating DESC
+            LIMIT 10
+        ''')
+    top = cur.fetchall()
+    conn.close()
+    if not top:
+        bot.send_message(call.message.chat.id, "В этой категории пока нет данных.")
+        return
+    text = f"🏆 Топ-10 по {category}:\n\n"
+    for i, row in enumerate(top, 1):
+        name = row['first_name'] or "Без имени"
+        if category == 'rating':
+            text += f"{i}. {name} — рейтинг {row['rating']}, уровень {row['level']}\n"
+        elif category == 'coins':
+            text += f"{i}. {name} — монет {row['coins']}, уровень {row['level']}\n"
+        elif category == 'level':
+            text += f"{i}. {name} — уровень {row['level']}, рейтинг {row['rating']}\n"
+    bot.send_message(call.message.chat.id, text)
+    bot.answer_callback_query(call.id)
+
+@bot.message_handler(func=lambda m: m.text == '🎁 Бонус' or m.text == '/bonus')
+def cmd_bonus(message):
+    user_id = message.from_user.id
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('SELECT last_bonus FROM users WHERE user_id = ?', (user_id,))
+    row = cur.fetchone()
+    last_bonus = row['last_bonus'] if row else None
+    today = datetime.now().date()
+    if last_bonus:
+        try:
+            last_date = datetime.fromisoformat(last_bonus).date()
+            if last_date == today:
+                bot.send_message(user_id, "❌ Ты уже получал бонус сегодня. Приходи завтра!")
+                conn.close()
+                return
+        except:
+            pass
+    cur.execute('UPDATE users SET coins = coins + 10, last_bonus = ? WHERE user_id = ?', (datetime.now(), user_id))
+    conn.commit()
+    conn.close()
+    bot.send_message(user_id, "🎉 Ты получил ежедневный бонус: +10 монет!")
+
+@bot.message_handler(func=lambda m: m.text == '✨ Сгенерировать описание' or m.text == '/generate_bio')
+def cmd_generate_bio(message):
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    if not user:
+        return
+    gender_str = {'male': 'парень', 'female': 'девушка', 'other': 'человек'}.get(user['gender'], 'человек')
+    age = user['age'] if user['age'] else '?'
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    markup.add('Музыка', 'Спорт', 'Кино', 'Книги', 'Путешествия', 'Игры', 'Другое')
+    msg = bot.send_message(user_id, "Выбери свои интересы (можно несколько, через запятую):", reply_markup=markup)
+    bot.register_next_step_handler(msg, process_interests_for_bio, user_id, gender_str, age)
+
+def process_interests_for_bio(message, user_id, gender_str, age):
+    interests = message.text
+    bio = f"Привет! Я {gender_str}, мне {age} лет. Интересуюсь: {interests}. Буду рад(а) пообщаться!"
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('UPDATE users SET bio = ? WHERE user_id = ?', (bio, user_id))
+    conn.commit()
+    conn.close()
+    bot.send_message(user_id, f"✅ Описание сгенерировано и сохранено:\n{bio}", reply_markup=types.ReplyKeyboardRemove())
+    show_main_menu(user_id)
+
 # ===== ДОНАТЫ =====
 @bot.message_handler(func=lambda m: m.text == '💰 Донат' or m.text == '/donate')
 def cmd_donate(message):
@@ -614,7 +957,6 @@ def process_report_reason(message):
 @bot.message_handler(commands=['sendto'])
 @admin_only
 def cmd_sendto(message):
-    # Формат: /sendto user_id текст
     parts = message.text.split(maxsplit=2)
     if len(parts) < 3:
         bot.reply_to(message, "❌ Использование: /sendto [user_id] [текст]")
@@ -625,20 +967,17 @@ def cmd_sendto(message):
     except ValueError:
         bot.reply_to(message, "❌ ID должен быть числом.")
         return
-
-    # Проверяем, существует ли пользователь (необязательно)
     user = get_user(target_id)
     if not user:
         bot.reply_to(message, f"❌ Пользователь с ID {target_id} не найден в базе.")
         return
-
     try:
         bot.send_message(target_id, f"📨 Сообщение от администратора:\n\n{text}")
         bot.reply_to(message, f"✅ Сообщение отправлено пользователю {target_id}.")
     except Exception as e:
         bot.reply_to(message, f"❌ Не удалось отправить сообщение: {e}")
 
-# ===== АДМИН-ПАНЕЛЬ (обновлена с упоминанием sendto) =====
+# ===== АДМИН-ПАНЕЛЬ (обновлена) =====
 @bot.message_handler(commands=['admin'])
 @admin_only
 def admin_panel(message):
@@ -658,7 +997,6 @@ def admin_panel(message):
     """
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
-# ===== ОСТАЛЬНЫЕ АДМИН-КОМАНДЫ (без изменений) =====
 @bot.message_handler(commands=['admin_stats'])
 @admin_only
 def admin_stats(message):
@@ -889,4 +1227,4 @@ if __name__ == '__main__':
     print("🟢 Запуск...")
     bot.remove_webhook()
     time.sleep(1)
-    bot.infinity_polling()    
+    bot.infinity_polling()
