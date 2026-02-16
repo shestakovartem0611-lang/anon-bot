@@ -31,11 +31,17 @@ logger = logging.getLogger(__name__)
 
 bot = telebot.TeleBot(TOKEN)
 
-# ===== БАЗА ДАННЫХ =====
-def init_db():
+# ===== БАЗА ДАННЫХ С ИМЕНОВАННЫМИ ПОЛЯМИ =====
+def get_db_connection():
+    """Возвращает соединение с БД, которое возвращает строки как словари"""
     conn = sqlite3.connect('dating_bot.db', check_same_thread=False)
+    conn.row_factory = sqlite3.Row  # Теперь к полям можно обращаться по именам
+    return conn
+
+def init_db():
+    conn = get_db_connection()
     cur = conn.cursor()
-    # Таблица пользователей с полями по умолчанию
+    # Таблица пользователей
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -176,17 +182,17 @@ init_db()
 
 # ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
 def get_user(user_id):
-    """Возвращает пользователя или None, с обработкой ошибок"""
-    conn = sqlite3.connect('dating_bot.db')
+    """Возвращает пользователя в виде словаря или None"""
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
     user = cur.fetchone()
     conn.close()
-    return user
+    return dict(user) if user else None
 
 def save_user(user_id, username, first_name, referrer_id=None):
     """Сохраняет нового пользователя или обновляет время активности"""
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
     if cur.fetchone():
@@ -214,7 +220,7 @@ def save_user(user_id, username, first_name, referrer_id=None):
 
 def update_user_profile(user_id, age, gender, search_gender, bio, photo_file_id=None):
     """Обновляет анкету пользователя"""
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     if photo_file_id:
         cur.execute('''
@@ -234,16 +240,14 @@ def is_profile_complete(user_id):
     user = get_user(user_id)
     if not user:
         return False
-    # Индексы полей: age (2), gender (3), search_gender (4), bio (5)
-    # Проверяем, что они не пустые и не равны значениям по умолчанию
-    return (user[2] and user[2] != 0 and 
-            user[3] and user[3] != 'не указан' and 
-            user[4] and user[4] != 'both' and 
-            user[5] and user[5] != '')
+    return (user['age'] and user['age'] != 0 and 
+            user['gender'] and user['gender'] != 'не указан' and 
+            user['search_gender'] and user['search_gender'] != 'both' and 
+            user['bio'] and user['bio'] != '')
 
 def get_active_conversation(user_id):
-    """Возвращает активный диалог пользователя"""
-    conn = sqlite3.connect('dating_bot.db')
+    """Возвращает активный диалог пользователя в виде словаря"""
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('''
         SELECT id, user1_id, user2_id FROM conversations
@@ -252,7 +256,7 @@ def get_active_conversation(user_id):
     row = cur.fetchone()
     conn.close()
     if row:
-        return {'id': row[0], 'user1_id': row[1], 'user2_id': row[2]}
+        return dict(row)
     return None
 
 def get_partner_id(user_id, conv):
@@ -260,12 +264,17 @@ def get_partner_id(user_id, conv):
 
 def end_conversation(conv_id):
     """Завершает диалог и отправляет оценку/жалобу обоим"""
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('SELECT user1_id, user2_id, rated_by_user1, rated_by_user2 FROM conversations WHERE id = ?', (conv_id,))
     row = cur.fetchone()
     if row:
-        user1, user2, rated1, rated2 = row
+        conv = dict(row)
+        user1 = conv['user1_id']
+        user2 = conv['user2_id']
+        rated1 = conv['rated_by_user1']
+        rated2 = conv['rated_by_user2']
+        
         cur.execute('UPDATE conversations SET is_active = 0, last_message_time = ? WHERE id = ?', (datetime.now(), conv_id))
         cur.execute('UPDATE users SET total_conversations = total_conversations + 1 WHERE user_id IN (?, ?)', (user1, user2))
         conn.commit()
@@ -297,7 +306,7 @@ def end_conversation(conv_id):
         conn.close()
 
 def add_to_waiting(user_id, search_gender):
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('''
         INSERT OR REPLACE INTO waiting_queue (user_id, joined_time, search_gender)
@@ -307,7 +316,7 @@ def add_to_waiting(user_id, search_gender):
     conn.close()
 
 def remove_from_waiting(user_id):
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('DELETE FROM waiting_queue WHERE user_id = ?', (user_id,))
     conn.commit()
@@ -319,10 +328,10 @@ def find_partner(user_id):
     if not user:
         return None, None
 
-    search_for = user[4]  # search_gender
-    my_gender = user[3]   # gender
+    search_for = user['search_gender']
+    my_gender = user['gender']
 
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     query = '''
         SELECT w.user_id FROM waiting_queue w
@@ -338,7 +347,7 @@ def find_partner(user_id):
     row = cur.fetchone()
 
     if row:
-        partner_id = row[0]
+        partner_id = row['user_id']
         cur.execute('DELETE FROM waiting_queue WHERE user_id IN (?, ?)', (user_id, partner_id))
         cur.execute('''
             INSERT INTO conversations (user1_id, user2_id, start_time, last_message_time)
@@ -353,7 +362,7 @@ def find_partner(user_id):
         return None, None
 
 def ban_user(user_id, reason='Нарушение правил', admin_id=None):
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('UPDATE users SET is_banned = 1, ban_reason = ? WHERE user_id = ?', (reason, user_id))
     cur.execute('DELETE FROM waiting_queue WHERE user_id = ?', (user_id,))
@@ -368,22 +377,22 @@ def ban_user(user_id, reason='Нарушение правил', admin_id=None):
         pass
 
 def unban_user(user_id):
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('UPDATE users SET is_banned = 0, ban_reason = NULL WHERE user_id = ?', (user_id,))
     conn.commit()
     conn.close()
 
 def get_all_users():
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('SELECT user_id, username, first_name, age, gender, is_banned, last_active FROM users ORDER BY last_active DESC')
-    users = cur.fetchall()
+    users = [dict(row) for row in cur.fetchall()]
     conn.close()
     return users
 
 def get_stats():
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('SELECT COUNT(*) FROM users')
     total_users = cur.fetchone()[0]
@@ -397,16 +406,16 @@ def get_stats():
     return total_users, banned_users, active_chats, waiting
 
 def broadcast_message(text):
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('SELECT user_id FROM users WHERE is_banned = 0')
     users = cur.fetchall()
     conn.close()
     success = 0
     fail = 0
-    for (user_id,) in users:
+    for user in users:
         try:
-            bot.send_message(user_id, text)
+            bot.send_message(user['user_id'], text)
             success += 1
             time.sleep(0.05)
         except:
@@ -414,12 +423,13 @@ def broadcast_message(text):
     return success, fail
 
 def update_user_level(user_id):
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('SELECT total_conversations, total_likes FROM users WHERE user_id = ?', (user_id,))
     row = cur.fetchone()
     if row:
-        convs, likes = row
+        convs = row['total_conversations']
+        likes = row['total_likes']
         level = 1 + int(math.sqrt(convs + likes // 2))
         cur.execute('UPDATE users SET level = ? WHERE user_id = ?', (level, user_id))
         conn.commit()
@@ -427,7 +437,7 @@ def update_user_level(user_id):
 
 def check_achievements(user_id):
     """Проверка и выдача достижений"""
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('SELECT id, condition_type, condition_value, reward_coins FROM achievements')
     achievements = cur.fetchall()
@@ -439,9 +449,16 @@ def check_achievements(user_id):
     if not user_data:
         conn.close()
         return
-    convs, likes, coins, last_bonus, photo = user_data
+    convs = user_data['total_conversations']
+    likes = user_data['total_likes']
+    photo = user_data['photo_file_id']
 
-    for ach_id, cond_type, cond_val, reward in achievements:
+    for ach in achievements:
+        ach_id = ach['id']
+        cond_type = ach['condition_type']
+        cond_val = ach['condition_value']
+        reward = ach['reward_coins']
+        
         cur.execute('SELECT 1 FROM user_achievements WHERE user_id = ? AND achievement_id = ?', (user_id, ach_id))
         if cur.fetchone():
             continue
@@ -462,7 +479,9 @@ def check_achievements(user_id):
             cur.execute('INSERT INTO user_achievements (user_id, achievement_id, unlocked_at) VALUES (?, ?, ?)',
                         (user_id, ach_id, datetime.now()))
             cur.execute('SELECT name, description FROM achievements WHERE id = ?', (ach_id,))
-            name, desc = cur.fetchone()
+            name_row = cur.fetchone()
+            name = name_row['name']
+            desc = name_row['description']
             bot.send_message(user_id, f"🏆 Достижение разблокировано: {name}\n{desc}\n+{reward} монет!")
     conn.commit()
     conn.close()
@@ -581,7 +600,7 @@ def show_main_menu(chat_id):
 # ===== ПРОВЕРКА БАНА =====
 def is_user_banned(user_id):
     user = get_user(user_id)
-    return user and user[10] == 1
+    return user and user['is_banned'] == 1
 
 # ===== КОМАНДЫ ПОЛЬЗОВАТЕЛЯ =====
 @bot.message_handler(func=lambda m: m.text == '👤 Моя анкета')
@@ -591,20 +610,21 @@ def show_profile(message):
     if not user:
         bot.send_message(user_id, "❌ Профиль не найден. Напиши /start для регистрации.")
         return
-    # Безопасное получение значений с подстановкой значений по умолчанию
-    age = user[2] if user[2] else 'не указан'
-    gender = user[3] if user[3] else 'не указан'
-    search_gender = user[4] if user[4] else 'не указано'
-    bio = user[5] if user[5] else 'не заполнено'
-    level = user[12] if user[12] is not None else 1
-    rating = user[11] if user[11] is not None else 0
-    coins = user[18] if user[18] is not None else 0
+    
+    # Безопасное получение значений
+    age = user['age'] if user['age'] else 'не указан'
+    gender = user['gender'] if user['gender'] else 'не указан'
+    search_gender = user['search_gender'] if user['search_gender'] else 'не указано'
+    bio = user['bio'] if user['bio'] else 'не заполнено'
+    level = user['level'] if user['level'] is not None else 1
+    rating = user['rating'] if user['rating'] is not None else 0
+    coins = user['coins'] if user['coins'] is not None else 0
 
     # Преобразование кодов пола в читаемый вид
     gender_str = {'male': 'Парень', 'female': 'Девушка', 'other': 'Другое'}.get(gender, str(gender))
     search_str = {'male': 'Парней', 'female': 'Девушек', 'both': 'Всех'}.get(search_gender, str(search_gender))
 
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('SELECT COUNT(*) FROM users WHERE referrer_id = ?', (user_id,))
     referrals_count = cur.fetchone()[0]
@@ -621,9 +641,9 @@ def show_profile(message):
 Монеты: {coins}
 Приглашено друзей: {referrals_count}
     """
-    if user[6]:
+    if user['photo_file_id']:
         try:
-            bot.send_photo(user_id, user[6], caption=profile_text)
+            bot.send_photo(user_id, user['photo_file_id'], caption=profile_text)
         except Exception as e:
             logger.error(f"Ошибка отправки фото: {e}")
             bot.send_message(user_id, profile_text + "\n\n(Фото не может быть отображено, возможно, оно устарело.)")
@@ -657,7 +677,7 @@ def cmd_search(message):
         bot.send_message(partner_id, "✅ Собеседник найден! Можете общаться.")
     else:
         user = get_user(user_id)
-        add_to_waiting(user_id, user[4])
+        add_to_waiting(user_id, user['search_gender'])
         bot.send_message(user_id, "🕒 Пока никого нет. Ты в очереди.")
 
 @bot.message_handler(func=lambda m: m.text == '⏹ Завершить диалог' or m.text == '/stop')
@@ -693,7 +713,7 @@ def cmd_mystats(message):
     user = get_user(user_id)
     if not user:
         return
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('SELECT COUNT(*) FROM conversations WHERE (user1_id = ? OR user2_id = ?) AND is_active = 0', (user_id, user_id))
     total_dialogs = cur.fetchone()[0]
@@ -711,9 +731,9 @@ def cmd_mystats(message):
 👥 Диалогов: {total_dialogs}
 👍 Лайков: {likes}
 👎 Дизлайков: {dislikes}
-⭐ Рейтинг: {user[11] if user[11] is not None else 0}
-📊 Уровень: {user[12] if user[12] is not None else 1}
-🪙 Монеты: {user[18] if user[18] is not None else 0}
+⭐ Рейтинг: {user['rating'] if user['rating'] is not None else 0}
+📊 Уровень: {user['level'] if user['level'] is not None else 1}
+🪙 Монеты: {user['coins'] if user['coins'] is not None else 0}
 🏆 Достижений: {achievements_count}
 👥 Приглашено: {referrals}
     """
@@ -731,7 +751,7 @@ def cmd_top_menu(message):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('top_'))
 def callback_top(call):
     category = call.data.split('_')[1]
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     if category == 'rating':
         cur.execute('''
@@ -760,25 +780,25 @@ def callback_top(call):
         bot.send_message(call.message.chat.id, "В этой категории пока нет данных.")
         return
     text = f"🏆 Топ-10 по {category}:\n\n"
-    for i, (uid, name, val1, val2) in enumerate(top, 1):
-        name = name or "Без имени"
+    for i, row in enumerate(top, 1):
+        name = row['first_name'] or "Без имени"
         if category == 'rating':
-            text += f"{i}. {name} — рейтинг {val1}, уровень {val2}\n"
+            text += f"{i}. {name} — рейтинг {row['rating']}, уровень {row['level']}\n"
         elif category == 'coins':
-            text += f"{i}. {name} — монет {val1}, уровень {val2}\n"
+            text += f"{i}. {name} — монет {row['coins']}, уровень {row['level']}\n"
         elif category == 'level':
-            text += f"{i}. {name} — уровень {val1}, рейтинг {val2}\n"
+            text += f"{i}. {name} — уровень {row['level']}, рейтинг {row['rating']}\n"
     bot.send_message(call.message.chat.id, text)
     bot.answer_callback_query(call.id)
 
 @bot.message_handler(func=lambda m: m.text == '🎁 Бонус' or m.text == '/bonus')
 def cmd_bonus(message):
     user_id = message.from_user.id
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('SELECT last_bonus FROM users WHERE user_id = ?', (user_id,))
     row = cur.fetchone()
-    last_bonus = row[0]
+    last_bonus = row['last_bonus'] if row else None
     today = datetime.now().date()
     if last_bonus:
         try:
@@ -800,8 +820,8 @@ def cmd_generate_bio(message):
     user = get_user(user_id)
     if not user:
         return
-    gender_str = {'male': 'парень', 'female': 'девушка', 'other': 'человек'}.get(user[3], 'человек')
-    age = user[2] if user[2] else '?'
+    gender_str = {'male': 'парень', 'female': 'девушка', 'other': 'человек'}.get(user['gender'], 'человек')
+    age = user['age'] if user['age'] else '?'
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     markup.add('Музыка', 'Спорт', 'Кино', 'Книги', 'Путешествия', 'Игры', 'Другое')
     msg = bot.send_message(user_id, "Выбери свои интересы (можно несколько, через запятую):", reply_markup=markup)
@@ -810,7 +830,7 @@ def cmd_generate_bio(message):
 def process_interests_for_bio(message, user_id, gender_str, age):
     interests = message.text
     bio = f"Привет! Я {gender_str}, мне {age} лет. Интересуюсь: {interests}. Буду рад(а) пообщаться!"
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('UPDATE users SET bio = ? WHERE user_id = ?', (bio, user_id))
     conn.commit()
@@ -864,7 +884,7 @@ def successful_payment(message):
     user_id = message.from_user.id
     total_amount = message.successful_payment.total_amount
     bonus_coins = total_amount * 2  # например, 2 монеты за 1 звезду
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('UPDATE users SET coins = coins + ? WHERE user_id = ?', (bonus_coins, user_id))
     conn.commit()
@@ -876,7 +896,7 @@ def successful_payment(message):
 @bot.message_handler(func=lambda m: m.text == '🤝 Рефералы' or m.text == '/referral')
 def cmd_referral(message):
     user_id = message.from_user.id
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('SELECT COUNT(*) FROM users WHERE referrer_id = ?', (user_id,))
     referrals_count = cur.fetchone()[0]
@@ -903,22 +923,25 @@ def cmd_referral(message):
 # ===== ОБРАБОТКА РЕЙТИНГА И ЖАЛОБ =====
 @bot.callback_query_handler(func=lambda call: call.data.startswith('rate_'))
 def callback_rate(call):
-    _, conv_id, partner_id, value = call.data.split('_')
+    parts = call.data.split('_')
+    _, conv_id, partner_id, value = parts
     conv_id = int(conv_id)
     partner_id = int(partner_id)
     value = int(value)
     user_id = call.from_user.id
 
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute('SELECT rated_by_user1, rated_by_user2 FROM conversations WHERE id = ?', (conv_id,))
+    cur.execute('SELECT rated_by_user1, rated_by_user2, user1_id, user2_id FROM conversations WHERE id = ?', (conv_id,))
     row = cur.fetchone()
     if not row:
         conn.close()
         return
-    rated1, rated2 = row
-    cur.execute('SELECT user1_id, user2_id FROM conversations WHERE id = ?', (conv_id,))
-    u1, u2 = cur.fetchone()
+    rated1 = row['rated_by_user1']
+    rated2 = row['rated_by_user2']
+    u1 = row['user1_id']
+    u2 = row['user2_id']
+    
     if user_id == u1:
         already_rated = rated1
     elif user_id == u2:
@@ -970,7 +993,7 @@ def process_report_reason(message):
     conv_id = data['conv_id']
     reported_id = data['reported_id']
 
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('''
         SELECT user_id, message FROM message_logs
@@ -978,7 +1001,7 @@ def process_report_reason(message):
         ORDER BY timestamp DESC LIMIT 10
     ''', (conv_id,))
     logs = cur.fetchall()
-    log_text = "\n".join([f"{'Собеседник' if uid == reported_id else 'Вы'}: {msg}" for uid, msg in reversed(logs)])
+    log_text = "\n".join([f"{'Собеседник' if row['user_id'] == reported_id else 'Вы'}: {row['message']}" for row in reversed(logs)])
 
     cur.execute('''
         INSERT INTO reports (reporter_id, reported_id, reason, timestamp, conversation_id, last_messages, status)
@@ -1026,7 +1049,7 @@ def admin_panel(message):
 @admin_only
 def admin_stats(message):
     total, banned, active, waiting = get_stats()
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM users WHERE date(last_active) = date('now')")
     active_today = cur.fetchone()[0]
@@ -1059,10 +1082,9 @@ def users_list(message):
         return
     text = "**Список пользователей (первые 50):**\n\n"
     for user in users[:50]:
-        user_id, username, first_name, age, gender, is_banned, last_active = user
-        status = "🔴 Забанен" if is_banned else "🟢 Активен"
-        name = username or first_name or "Без имени"
-        line = f"ID: {user_id} | {name} | Возраст: {age} | Пол: {gender} | {status} | Последний вход: {last_active[:16]}\n"
+        status = "🔴 Забанен" if user['is_banned'] else "🟢 Активен"
+        name = user['username'] or user['first_name'] or "Без имени"
+        line = f"ID: {user['user_id']} | {name} | Возраст: {user['age']} | Пол: {user['gender']} | {status} | Последний вход: {user['last_active'][:16]}\n"
         text += line
     bot.send_message(message.chat.id, text[:4000])
 
@@ -1110,7 +1132,7 @@ def broadcast_command(message):
 @bot.message_handler(commands=['demographics'])
 @admin_only
 def demographics(message):
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT gender, COUNT(*) FROM users WHERE is_banned = 0 GROUP BY gender")
     gender_stats = cur.fetchall()
@@ -1120,18 +1142,18 @@ def demographics(message):
     age_dist = cur.fetchall()
     conn.close()
     text = "📊 **Демография**\n\n"
-    for gender, count in gender_stats:
-        gender_name = {'male': 'Парни', 'female': 'Девушки', 'other': 'Другое'}.get(gender, gender)
-        text += f"{gender_name}: {count}\n"
+    for row in gender_stats:
+        gender_name = {'male': 'Парни', 'female': 'Девушки', 'other': 'Другое'}.get(row['gender'], row['gender'])
+        text += f"{gender_name}: {row['COUNT(*)']}\n"
     text += f"\nСредний возраст: {avg_age:.1f}\n\nРаспределение по возрастам:\n"
-    for age, cnt in age_dist[:20]:
-        text += f"{age} лет: {cnt}\n"
+    for row in age_dist[:20]:
+        text += f"{row['age']} лет: {row['COUNT(*)']}\n"
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['reports'])
 @admin_only
 def list_reports(message):
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("SELECT id, reporter_id, reported_id, reason, timestamp FROM reports WHERE status = 'new' ORDER BY timestamp DESC LIMIT 10")
     reports = cur.fetchall()
@@ -1141,7 +1163,7 @@ def list_reports(message):
         return
     text = "📋 **Новые жалобы:**\n\n"
     for r in reports:
-        text += f"#{r[0]} от {r[4][:16]}: {r[1]} -> {r[2]}\nПричина: {r[3][:50]}...\n"
+        text += f"#{r['id']} от {r['timestamp'][:16]}: {r['reporter_id']} -> {r['reported_id']}\nПричина: {r['reason'][:50]}...\n"
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['report'])
@@ -1152,7 +1174,7 @@ def view_report(message):
     except:
         bot.reply_to(message, "❌ Использование: /report [id]")
         return
-    conn = sqlite3.connect('dating_bot.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('''
         SELECT reporter_id, reported_id, reason, timestamp, last_messages, status
@@ -1163,19 +1185,18 @@ def view_report(message):
     if not row:
         bot.reply_to(message, "❌ Жалоба не найдена.")
         return
-    reporter, reported, reason, ts, logs, status = row
     text = f"""
 📋 **Жалоба #{report_id}**
-Статус: {status}
-От: {reporter}
-На: {reported}
-Время: {ts}
-Причина: {reason}
+Статус: {row['status']}
+От: {row['reporter_id']}
+На: {row['reported_id']}
+Время: {row['timestamp']}
+Причина: {row['reason']}
 
 **Последние сообщения:**
-{logs}
+{row['last_messages']}
 
-Чтобы забанить нарушителя, ответь на это сообщение командой /ban {reported} [причина]
+Чтобы забанить нарушителя, ответь на это сообщение командой /ban {row['reported_id']} [причина]
     """
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
@@ -1218,7 +1239,7 @@ def handle_chat_message(message):
 
     try:
         msg_text = message.text or message.caption or f"[{message.content_type}]"
-        conn = sqlite3.connect('dating_bot.db')
+        conn = get_db_connection()
         cur = conn.cursor()
         cur.execute('''
             INSERT INTO message_logs (conversation_id, user_id, message, timestamp)
@@ -1252,7 +1273,7 @@ def handle_chat_message(message):
 # ===== ЗАПУСК =====
 if __name__ == '__main__':
     print("=" * 50)
-    print("🤖 Анонимный чат-бот с донатами через Stars")
+    print("🤖 Анонимный чат-бот с исправленной анкетой")
     print("=" * 50)
     print(f"👑 Админ ID: {ADMIN_ID}")
     print("🟢 Запуск...")
