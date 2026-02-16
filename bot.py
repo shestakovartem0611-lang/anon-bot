@@ -12,6 +12,8 @@ import re
 TOKEN = '8494465153:AAGhNsVnNmDE0LTtSSh2A5GE013Wptw0tvw'  # твой токен
 ADMIN_ID = 1760627021     # твой ID
 PROVIDER_TOKEN = 'YOUR_PROVIDER_TOKEN'  # токен для платежей (получить у @BotFather)
+REFERRAL_BONUS = 20       # бонус за приглашённого друга (монет)
+REFERRAL_BONUS_FOR_NEW = 10  # бонус новому пользователю за регистрацию по рефералке
 
 # Настройка логирования
 logging.basicConfig(
@@ -30,7 +32,7 @@ bot = telebot.TeleBot(TOKEN)
 def init_db():
     conn = sqlite3.connect('dating_bot.db', check_same_thread=False)
     cur = conn.cursor()
-    # Таблица пользователей (добавлены поля coins, last_bonus)
+    # Таблица пользователей (добавлены поля coins, last_bonus, referrer_id)
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -52,7 +54,8 @@ def init_db():
             total_likes INTEGER DEFAULT 0,
             total_dislikes INTEGER DEFAULT 0,
             coins INTEGER DEFAULT 0,
-            last_bonus TIMESTAMP
+            last_bonus TIMESTAMP,
+            referrer_id INTEGER DEFAULT NULL
         )
     ''')
     # Таблица достижений
@@ -73,6 +76,16 @@ def init_db():
             achievement_id INTEGER,
             unlocked_at TIMESTAMP,
             PRIMARY KEY (user_id, achievement_id)
+        )
+    ''')
+    # Таблица для учёта наград за рефералов (чтобы не начислить дважды)
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS referral_rewards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            referrer_id INTEGER,
+            referred_id INTEGER,
+            reward_coins INTEGER,
+            rewarded_at TIMESTAMP
         )
     ''')
     # Таблица диалогов
@@ -140,12 +153,12 @@ def init_db():
             ('Болтун', 'Провести 10 диалогов', 'conversations', 10, 20),
             ('Звезда', 'Получить 10 лайков', 'likes', 10, 15),
             ('Популярный', 'Получить 50 лайков', 'likes', 50, 50),
-            ('Джентльмен', 'Получить 5 комплиментов (лайков подряд?)', 'consecutive_likes', 5, 10),  # упростим
+            ('Джентльмен', 'Получить 5 комплиментов (лайков подряд?)', 'consecutive_likes', 5, 10),
             ('Завсегдатай', 'Заходить 7 дней подряд', 'streak_days', 7, 30),
             ('Фотогеничный', 'Загрузить фото', 'photo', 1, 5),
             ('Душа компании', 'Провести 5 диалогов за день', 'daily_conversations', 5, 25),
             ('Модератор', 'Отправить 3 жалобы', 'reports', 3, 10),
-            ('Благодетель', 'Сделать донат', 'donation', 1, 0)  # без награды монетами
+            ('Благодетель', 'Сделать донат', 'donation', 1, 0)
         ]
         for a in achievements:
             cur.execute('''
@@ -167,13 +180,39 @@ def get_user(user_id):
     conn.close()
     return user
 
-def save_user(user_id, username, first_name):
+def save_user(user_id, username, first_name, referrer_id=None):
     conn = sqlite3.connect('dating_bot.db')
     cur = conn.cursor()
-    cur.execute('''
-        INSERT OR IGNORE INTO users (user_id, username, first_name, reg_date, last_active)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (user_id, username, first_name, datetime.now(), datetime.now()))
+    # Проверяем, существует ли уже пользователь
+    cur.execute('SELECT user_id FROM users WHERE user_id = ?', (user_id,))
+    if cur.fetchone():
+        # Пользователь уже есть, просто обновим last_active
+        cur.execute('UPDATE users SET last_active = ? WHERE user_id = ?', (datetime.now(), user_id))
+    else:
+        # Новый пользователь, вставляем с referrer_id
+        cur.execute('''
+            INSERT INTO users (user_id, username, first_name, reg_date, last_active, referrer_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user_id, username, first_name, datetime.now(), datetime.now(), referrer_id))
+        # Если есть реферер, начисляем бонусы
+        if referrer_id:
+            # Проверяем, не был ли уже начислен бонус за этого реферала
+            cur.execute('SELECT 1 FROM referral_rewards WHERE referred_id = ?', (user_id,))
+            if not cur.fetchone():
+                # Начисляем бонус рефереру
+                cur.execute('UPDATE users SET coins = coins + ? WHERE user_id = ?', (REFERRAL_BONUS, referrer_id))
+                # Начисляем бонус новому пользователю
+                cur.execute('UPDATE users SET coins = coins + ? WHERE user_id = ?', (REFERRAL_BONUS_FOR_NEW, user_id))
+                # Записываем факт начисления
+                cur.execute('''
+                    INSERT INTO referral_rewards (referrer_id, referred_id, reward_coins, rewarded_at)
+                    VALUES (?, ?, ?, ?)
+                ''', (referrer_id, user_id, REFERRAL_BONUS, datetime.now()))
+                # Уведомляем реферера (если можем)
+                try:
+                    bot.send_message(referrer_id, f"🎉 По вашей реферальной ссылке зарегистрировался новый пользователь! Вам начислено {REFERRAL_BONUS} монет.")
+                except:
+                    pass
     conn.commit()
     conn.close()
 
@@ -446,7 +485,17 @@ user_data = {}
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
     user_id = message.from_user.id
-    save_user(user_id, message.from_user.username, message.from_user.first_name)
+    args = message.text.split()
+    referrer_id = None
+    if len(args) > 1:
+        # Ожидается формат: /start ref_123456
+        ref_param = args[1]
+        if ref_param.startswith('ref_'):
+            try:
+                referrer_id = int(ref_param.split('_')[1])
+            except:
+                pass
+    save_user(user_id, message.from_user.username, message.from_user.first_name, referrer_id)
 
     if is_user_banned(user_id):
         bot.reply_to(message, "🚫 Вы забанены и не можете пользоваться ботом.")
@@ -530,7 +579,7 @@ def show_main_menu(chat_id):
     markup.add('👤 Моя анкета', '✏ Редактировать анкету')
     markup.add('📊 Статистика', '📈 Моя статистика')
     markup.add('🏆 Топ', '🎁 Бонус', '✨ Сгенерировать описание')
-    markup.add('💰 Донат')
+    markup.add('💰 Донат', '🤝 Рефералы')
     bot.send_message(chat_id, "Главное меню:", reply_markup=markup)
 
 # ===== ПРОВЕРКА БАНА =====
@@ -547,6 +596,12 @@ def show_profile(message):
         return
     gender_str = {'male': 'Парень', 'female': 'Девушка', 'other': 'Другое'}.get(user[3], 'Не указан')
     search_str = {'male': 'Парней', 'female': 'Девушек', 'both': 'Всех'}.get(user[4], 'Не указано')
+    # Получаем количество рефералов
+    conn = sqlite3.connect('dating_bot.db')
+    cur = conn.cursor()
+    cur.execute('SELECT COUNT(*) FROM users WHERE referrer_id = ?', (user_id,))
+    referrals_count = cur.fetchone()[0]
+    conn.close()
     profile_text = f"""
 👤 Твоя анкета:
 Возраст: {user[2]}
@@ -556,6 +611,7 @@ def show_profile(message):
 Уровень: {user[12]}
 Рейтинг: {user[11]}
 Монеты: {user[18]}
+Приглашено друзей: {referrals_count}
     """
     if user[6]:
         try:
@@ -638,6 +694,8 @@ def cmd_mystats(message):
     dislikes = cur.fetchone()[0]
     cur.execute('SELECT COUNT(*) FROM user_achievements WHERE user_id = ?', (user_id,))
     achievements_count = cur.fetchone()[0]
+    cur.execute('SELECT COUNT(*) FROM users WHERE referrer_id = ?', (user_id,))
+    referrals = cur.fetchone()[0]
     conn.close()
     text = f"""
 📈 Твоя статистика:
@@ -648,6 +706,7 @@ def cmd_mystats(message):
 📊 Уровень: {user[12]}
 🪙 Монеты: {user[18]}
 🏆 Достижений: {achievements_count}
+👥 Приглашено: {referrals}
     """
     bot.send_message(message.chat.id, text)
 
@@ -752,10 +811,7 @@ def process_interests_for_bio(message, user_id, gender_str, age):
 
 @bot.message_handler(func=lambda m: m.text == '💰 Донат' or m.text == '/donate')
 def cmd_donate(message):
-    # Создаём инвойс на 50 звёзд (можно изменить)
-    prices = [types.LabeledPrice(label='Поддержка бота', amount=5000)]  # 50.00 RUB (в копейках) или 50 звёзд? Для Stars amount = количество звёзд * 100? На самом деле Stars передаются в минимальных единицах (1 звезда = 1 цент). В документации: для Stars нужно использовать валюту "XTR" и amount = количество звёзд.
-    # Но для простоты используем стандартную валюту RUB, а для Stars нужно указывать "XTR"
-    # Предположим, что PROVIDER_TOKEN настроен на приём Stars
+    # Создаём инвойс на 50 звёзд (для примера)
     bot.send_invoice(
         message.chat.id,
         title='Поддержка бота',
@@ -765,9 +821,6 @@ def cmd_donate(message):
         currency='XTR',  # для Stars
         prices=[types.LabeledPrice(label='Донат', amount=50)],  # 50 звёзд
         start_parameter='donate',
-        photo_url=None,
-        photo_height=None,
-        photo_width=None,
         need_name=False,
         need_phone_number=False,
         need_email=False,
@@ -792,6 +845,36 @@ def successful_payment(message):
     bot.send_message(user_id, "✅ Спасибо за поддержку! Тебе начислено 100 монет.")
     # Проверяем достижение "Благодетель"
     check_achievements(user_id)
+
+@bot.message_handler(func=lambda m: m.text == '🤝 Рефералы' or m.text == '/referral')
+def cmd_referral(message):
+    user_id = message.from_user.id
+    # Получаем количество рефералов
+    conn = sqlite3.connect('dating_bot.db')
+    cur = conn.cursor()
+    cur.execute('SELECT COUNT(*) FROM users WHERE referrer_id = ?', (user_id,))
+    referrals_count = cur.fetchone()[0]
+    # Получаем сумму заработанных монет по реферальной программе
+    cur.execute('SELECT SUM(reward_coins) FROM referral_rewards WHERE referrer_id = ?', (user_id,))
+    earned = cur.fetchone()[0] or 0
+    conn.close()
+    # Генерируем реферальную ссылку
+    bot_username = bot.get_me().username
+    ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+    text = f"""
+🤝 **Реферальная программа**
+
+Приглашай друзей и получай бонусы!
+За каждого друга, зарегистрировавшегося по твоей ссылке, ты получишь **{REFERRAL_BONUS} монет**, а друг — **{REFERRAL_BONUS_FOR_NEW} монет** сразу после регистрации.
+
+📊 Твоя статистика:
+• Приглашено друзей: {referrals_count}
+• Заработано монет: {earned}
+
+🔗 Твоя реферальная ссылка:
+`{ref_link}`
+    """
+    bot.send_message(user_id, text, parse_mode='Markdown')
 
 # ===== ОБРАБОТКА РЕЙТИНГА И ЖАЛОБ =====
 @bot.callback_query_handler(func=lambda call: call.data.startswith('rate_'))
@@ -931,6 +1014,8 @@ def admin_stats(message):
     new_chats_today = cur.fetchone()[0]
     cur.execute("SELECT SUM(coins) FROM users")
     total_coins = cur.fetchone()[0] or 0
+    cur.execute("SELECT COUNT(*) FROM referral_rewards")
+    total_referrals = cur.fetchone()[0] or 0
     conn.close()
     text = f"""
 📈 **Детальная статистика**
@@ -941,6 +1026,7 @@ def admin_stats(message):
 📅 Активных сегодня: {active_today}
 🆕 Новых чатов сегодня: {new_chats_today}
 🪙 Всего монет: {total_coins}
+👥 Всего рефералов: {total_referrals}
     """
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
@@ -996,8 +1082,10 @@ def broadcast_command(message):
     if not text:
         bot.reply_to(message, "❌ Введи текст рассылки: /broadcast [текст]")
         return
+    # Добавляем префикс "от администратора"
+    admin_text = "📢 Сообщение от администратора:\n\n" + text
     bot.reply_to(message, "⏳ Начинаю рассылку...")
-    success, fail = broadcast_message(text)
+    success, fail = broadcast_message(admin_text)
     bot.send_message(message.chat.id, f"✅ Рассылка завершена.\nУспешно: {success}\nНе доставлено: {fail}")
 
 @bot.message_handler(commands=['demographics'])
@@ -1147,7 +1235,7 @@ def handle_chat_message(message):
 # ===== ЗАПУСК =====
 if __name__ == '__main__':
     print("=" * 50)
-    print("🤖 Анонимный чат-бот с бонусами, ачивками и донатами")
+    print("🤖 Анонимный чат-бот с реферальной программой")
     print("=" * 50)
     print(f"👑 Админ ID: {ADMIN_ID}")
     print("🟢 Запуск...")
