@@ -11,7 +11,7 @@ import json
 
 # ===== НАСТРОЙКИ =====
 TOKEN = '8494465153:AAGhNsVnNmDE0LTtSSh2A5GE013Wptw0tvw'  # твой токен
-ADMIN_ID = 1760627021     # твой ID
+ADMIN_ID = 1760627021 2091630272     # твой ID
 REFERRAL_BONUS = 20       # бонус за приглашённого друга (монет)
 REFERRAL_BONUS_FOR_NEW = 10  # бонус новому пользователю за регистрацию по рефералке
 DONATION_AMOUNTS = [5, 10, 20, 50, 100, 200]  # суммы для донатов
