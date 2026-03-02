@@ -443,12 +443,16 @@ def check_achievements(user_id):
     conn.commit()
     conn.close()
 
-# ===== ДЕКОРАТОР АДМИНА =====
+# ===== ДЕКОРАТОР АДМИНА (С ДИАГНОСТИКОЙ) =====
 def admin_only(func):
     def wrapper(message):
-        if message.from_user.id not in ADMIN_IDS:
+        user_id = message.from_user.id
+        logger.info(f"🔍 Проверка админа: пользователь {user_id}, список админов {ADMIN_IDS}")
+        if user_id not in ADMIN_IDS:
+            logger.warning(f"🚫 Доступ запрещён для {user_id}")
             bot.reply_to(message, "🚫 Эта команда только для администратора.")
             return
+        logger.info(f"✅ Доступ разрешён для {user_id}")
         return func(message)
     return wrapper
 
@@ -950,7 +954,6 @@ def process_report_reason(message):
 
 Чтобы забанить, ответь на это сообщение командой: `/ban {reported_id} [причина]`
     """
-    # Отправляем жалобу всем админам
     for admin_id in ADMIN_IDS:
         try:
             bot.send_message(admin_id, admin_msg, parse_mode='Markdown')
@@ -979,7 +982,6 @@ def cmd_sendto(message):
         bot.reply_to(message, f"❌ Пользователь с ID {target_id} не найден в базе.")
         return
     try:
-        # Создаём клавиатуру с кнопкой ответа
         markup = types.InlineKeyboardMarkup()
         btn = types.InlineKeyboardButton("✉️ Ответить администратору", callback_data=f"reply_{target_id}")
         markup.add(btn)
@@ -1003,7 +1005,6 @@ def process_reply_to_admin(message):
     user = get_user(user_id)
     name = user['first_name'] or user['username'] or f"Пользователь {user_id}"
     admin_msg = f"📨 Ответ от пользователя {name} (ID: {user_id}):\n\n{reply_text}"
-    # Отправляем ответ всем админам
     for admin_id in ADMIN_IDS:
         try:
             bot.send_message(admin_id, admin_msg)
@@ -1261,7 +1262,6 @@ if __name__ == '__main__':
     print(f"👑 Админы: {', '.join(map(str, ADMIN_IDS))}")
     print("🟢 Запуск...")
 
-    # Уведомляем всех админов о запуске
     for admin_id in ADMIN_IDS:
         try:
             bot.send_message(admin_id, "✅ Бот запущен и готов к работе!")
