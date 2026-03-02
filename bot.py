@@ -443,7 +443,7 @@ def check_achievements(user_id):
     conn.commit()
     conn.close()
 
-# ===== ДЕКОРАТОР АДМИНА (ПРОВЕРКА ПО СПИСКУ) =====
+# ===== ДЕКОРАТОР АДМИНА =====
 def admin_only(func):
     def wrapper(message):
         if message.from_user.id not in ADMIN_IDS:
@@ -1007,8 +1007,8 @@ def process_reply_to_admin(message):
     for admin_id in ADMIN_IDS:
         try:
             bot.send_message(admin_id, admin_msg)
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Не удалось отправить ответ админу {admin_id}: {e}")
     bot.send_message(user_id, "✅ Твой ответ отправлен администратору.")
     user_data.pop(user_id, None)
 
@@ -1256,7 +1256,7 @@ def handle_chat_message(message):
 # ===== ЗАПУСК =====
 if __name__ == '__main__':
     print("=" * 50)
-    print("🤖 Анонимный чат-бот (мультиадминка)")
+    print("🤖 Анонимный чат-бот (мультиадминка с диагностикой)")
     print("=" * 50)
     print(f"👑 Админы: {', '.join(map(str, ADMIN_IDS))}")
     print("🟢 Запуск...")
@@ -1265,8 +1265,9 @@ if __name__ == '__main__':
     for admin_id in ADMIN_IDS:
         try:
             bot.send_message(admin_id, "✅ Бот запущен и готов к работе!")
-        except:
-            pass
+            logger.info(f"Уведомление админу {admin_id} отправлено")
+        except Exception as e:
+            logger.error(f"Не удалось отправить уведомление админу {admin_id}: {e}")
 
     bot.remove_webhook()
     time.sleep(1)
