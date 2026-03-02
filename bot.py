@@ -11,10 +11,10 @@ import json
 
 # ===== НАСТРОЙКИ =====
 TOKEN = '8494465153:AAGhNsVnNmDE0LTtSSh2A5GE013Wptw0tvw'  # твой токен
-ADMIN_ID = 1760627021 2091630272     # твой ID
-REFERRAL_BONUS = 20       # бонус за приглашённого друга (монет)
-REFERRAL_BONUS_FOR_NEW = 10  # бонус новому пользователю за регистрацию по рефералке
-DONATION_AMOUNTS = [5, 10, 20, 50, 100, 200]  # суммы для донатов
+ADMIN_IDS = [1760627021, 2091630272]                     # ID администраторов
+REFERRAL_BONUS = 20                                      # бонус за приглашённого друга (монет)
+REFERRAL_BONUS_FOR_NEW = 10                              # бонус новому пользователю за регистрацию по рефералке
+DONATION_AMOUNTS = [5, 10, 20, 50, 100, 200]             # суммы для донатов
 
 # Настройка логирования
 logging.basicConfig(
@@ -38,7 +38,6 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
-    # Таблица пользователей
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -64,7 +63,6 @@ def init_db():
             referrer_id INTEGER DEFAULT NULL
         )
     ''')
-    # Таблица достижений
     cur.execute('''
         CREATE TABLE IF NOT EXISTS achievements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,7 +143,6 @@ def init_db():
     ''')
     conn.commit()
 
-    # Заполняем достижения, если пусто
     cur.execute('SELECT COUNT(*) FROM achievements')
     if cur.fetchone()[0] == 0:
         achievements = [
@@ -446,10 +443,10 @@ def check_achievements(user_id):
     conn.commit()
     conn.close()
 
-# ===== ДЕКОРАТОР АДМИНА =====
+# ===== ДЕКОРАТОР АДМИНА (ПРОВЕРКА ПО СПИСКУ) =====
 def admin_only(func):
     def wrapper(message):
-        if message.from_user.id != ADMIN_ID:
+        if message.from_user.id not in ADMIN_IDS:
             bot.reply_to(message, "🚫 Эта команда только для администратора.")
             return
         return func(message)
@@ -941,6 +938,7 @@ def process_report_reason(message):
     conn.commit()
     report_id = cur.lastrowid
     conn.close()
+
     admin_msg = f"""
 🚨 **Новая жалоба #{report_id}**
 От: {user_id}
@@ -952,7 +950,13 @@ def process_report_reason(message):
 
 Чтобы забанить, ответь на это сообщение командой: `/ban {reported_id} [причина]`
     """
-    bot.send_message(ADMIN_ID, admin_msg, parse_mode='Markdown')
+    # Отправляем жалобу всем админам
+    for admin_id in ADMIN_IDS:
+        try:
+            bot.send_message(admin_id, admin_msg, parse_mode='Markdown')
+        except Exception as e:
+            logger.error(f"Не удалось отправить жалобу админу {admin_id}: {e}")
+
     bot.send_message(user_id, "✅ Жалоба отправлена администратору. Спасибо!")
     check_achievements(user_id)
 
@@ -987,7 +991,6 @@ def cmd_sendto(message):
 # ===== ОБРАБОТЧИК ДЛЯ КНОПКИ "ОТВЕТИТЬ АДМИНИСТРАТОРУ" =====
 @bot.callback_query_handler(func=lambda call: call.data.startswith('reply_'))
 def callback_reply_to_admin(call):
-    # Запускает процесс ответа администратору
     user_id = call.from_user.id
     user_data[user_id] = {'step': 'reply_to_admin'}
     bot.send_message(user_id, "Напиши свой ответ администратору (одним сообщением):")
@@ -1000,7 +1003,12 @@ def process_reply_to_admin(message):
     user = get_user(user_id)
     name = user['first_name'] or user['username'] or f"Пользователь {user_id}"
     admin_msg = f"📨 Ответ от пользователя {name} (ID: {user_id}):\n\n{reply_text}"
-    bot.send_message(ADMIN_ID, admin_msg)
+    # Отправляем ответ всем админам
+    for admin_id in ADMIN_IDS:
+        try:
+            bot.send_message(admin_id, admin_msg)
+        except:
+            pass
     bot.send_message(user_id, "✅ Твой ответ отправлен администратору.")
     user_data.pop(user_id, None)
 
@@ -1248,10 +1256,18 @@ def handle_chat_message(message):
 # ===== ЗАПУСК =====
 if __name__ == '__main__':
     print("=" * 50)
-    print("🤖 Анонимный чат-бот с ответом администратору")
+    print("🤖 Анонимный чат-бот (мультиадминка)")
     print("=" * 50)
-    print(f"👑 Админ ID: {ADMIN_ID}")
+    print(f"👑 Админы: {', '.join(map(str, ADMIN_IDS))}")
     print("🟢 Запуск...")
+
+    # Уведомляем всех админов о запуске
+    for admin_id in ADMIN_IDS:
+        try:
+            bot.send_message(admin_id, "✅ Бот запущен и готов к работе!")
+        except:
+            pass
+
     bot.remove_webhook()
     time.sleep(1)
-    bot.infinity_polling()        
+    bot.infinity_polling()
