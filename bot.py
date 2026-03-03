@@ -38,6 +38,7 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
+    # Таблица пользователей
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -63,6 +64,7 @@ def init_db():
             referrer_id INTEGER DEFAULT NULL
         )
     ''')
+    # Таблица достижений
     cur.execute('''
         CREATE TABLE IF NOT EXISTS achievements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,6 +83,7 @@ def init_db():
             PRIMARY KEY (user_id, achievement_id)
         )
     ''')
+    # Таблица для учёта наград за рефералов
     cur.execute('''
         CREATE TABLE IF NOT EXISTS referral_rewards (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,6 +93,7 @@ def init_db():
             rewarded_at TIMESTAMP
         )
     ''')
+    # Таблица диалогов
     cur.execute('''
         CREATE TABLE IF NOT EXISTS conversations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,6 +106,7 @@ def init_db():
             rated_by_user2 INTEGER DEFAULT 0
         )
     ''')
+    # Таблица оценок
     cur.execute('''
         CREATE TABLE IF NOT EXISTS ratings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,6 +117,7 @@ def init_db():
             conversation_id INTEGER
         )
     ''')
+    # Таблица очереди
     cur.execute('''
         CREATE TABLE IF NOT EXISTS waiting_queue (
             user_id INTEGER PRIMARY KEY,
@@ -119,6 +125,7 @@ def init_db():
             search_gender TEXT
         )
     ''')
+    # Таблица жалоб
     cur.execute('''
         CREATE TABLE IF NOT EXISTS reports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -132,6 +139,7 @@ def init_db():
             last_messages TEXT
         )
     ''')
+    # Таблица логов сообщений
     cur.execute('''
         CREATE TABLE IF NOT EXISTS message_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,8 +149,18 @@ def init_db():
             timestamp TIMESTAMP
         )
     ''')
+    # ===== НОВАЯ ТАБЛИЦА ДЛЯ ПРЕДУПРЕЖДЕНИЙ =====
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS warnings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            reason TEXT,
+            timestamp TIMESTAMP
+        )
+    ''')
     conn.commit()
 
+    # Заполняем достижения, если пусто
     cur.execute('SELECT COUNT(*) FROM achievements')
     if cur.fetchone()[0] == 0:
         achievements = [
@@ -167,6 +185,69 @@ def init_db():
     logger.info("✅ База данных инициализирована")
 
 init_db()
+
+# ===== ФИЛЬТР МАТА =====
+def load_bad_words():
+    """Загружает список запрещённых слов из файла"""
+    try:
+        with open('bad_words.txt', 'r', encoding='utf-8') as f:
+            words = [line.strip().lower() for line in f if line.strip()]
+            logger.info(f"✅ Загружено {len(words)} запрещённых слов")
+            return words
+    except FileNotFoundError:
+        logger.warning("⚠️ Файл bad_words.txt не найден. Фильтр мата отключён")
+        return []
+
+BAD_WORDS = load_bad_words()
+
+def contains_bad_words(text):
+    """Проверяет, содержит ли текст запрещённые слова"""
+    if not text or not BAD_WORDS:
+        return False
+    text_lower = text.lower()
+    for word in BAD_WORDS:
+        if word in text_lower:
+            return True
+    return False
+
+# ===== СИСТЕМА ПРЕДУПРЕЖДЕНИЙ =====
+def add_warning(user_id, reason="Нарушение правил"):
+    """Добавляет предупреждение пользователю. Возвращает (количество_предупреждений, был_ли_бан)"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('''
+        INSERT INTO warnings (user_id, reason, timestamp)
+        VALUES (?, ?, ?)
+    ''', (user_id, reason, datetime.now()))
+    conn.commit()
+    
+    # Получаем количество предупреждений
+    cur.execute('SELECT COUNT(*) FROM warnings WHERE user_id = ?', (user_id,))
+    warning_count = cur.fetchone()[0]
+    conn.close()
+    
+    # Если 3 предупреждения - бан
+    if warning_count >= 3:
+        ban_user(user_id, "3 предупреждения о нарушении", None)  # None, потому что банит система, не админ
+        return warning_count, True
+    return warning_count, False
+
+def get_warnings(user_id):
+    """Возвращает количество предупреждений пользователя"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('SELECT COUNT(*) FROM warnings WHERE user_id = ?', (user_id,))
+    count = cur.fetchone()[0]
+    conn.close()
+    return count
+
+def clear_warnings(user_id):
+    """Очищает предупреждения пользователя"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('DELETE FROM warnings WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
 
 # ===== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====
 def get_user(user_id):
@@ -340,6 +421,8 @@ def ban_user(user_id, reason='Нарушение правил', admin_id=None):
     cur.execute('UPDATE users SET is_banned = 1, ban_reason = ? WHERE user_id = ?', (reason, user_id))
     cur.execute('DELETE FROM waiting_queue WHERE user_id = ?', (user_id,))
     cur.execute('UPDATE conversations SET is_active = 0 WHERE user1_id = ? OR user2_id = ?', (user_id, user_id))
+    # При бане очищаем предупреждения
+    cur.execute('DELETE FROM warnings WHERE user_id = ?', (user_id,))
     conn.commit()
     conn.close()
     if admin_id:
@@ -353,6 +436,8 @@ def unban_user(user_id):
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('UPDATE users SET is_banned = 0, ban_reason = NULL WHERE user_id = ?', (user_id,))
+    # При разбане тоже очищаем предупреждения (можно и не очищать, но для порядка)
+    cur.execute('DELETE FROM warnings WHERE user_id = ?', (user_id,))
     conn.commit()
     conn.close()
 
@@ -443,16 +528,13 @@ def check_achievements(user_id):
     conn.commit()
     conn.close()
 
-# ===== ДЕКОРАТОР АДМИНА (С ДИАГНОСТИКОЙ) =====
+# ===== ДЕКОРАТОР АДМИНА =====
 def admin_only(func):
     def wrapper(message):
         user_id = message.from_user.id
-        logger.info(f"🔍 Проверка админа: пользователь {user_id}, список админов {ADMIN_IDS}")
         if user_id not in ADMIN_IDS:
-            logger.warning(f"🚫 Доступ запрещён для {user_id}")
             bot.reply_to(message, "🚫 Эта команда только для администратора.")
             return
-        logger.info(f"✅ Доступ разрешён для {user_id}")
         return func(message)
     return wrapper
 
@@ -1013,7 +1095,7 @@ def process_reply_to_admin(message):
     bot.send_message(user_id, "✅ Твой ответ отправлен администратору.")
     user_data.pop(user_id, None)
 
-# ===== АДМИН-ПАНЕЛЬ =====
+# ===== АДМИН-ПАНЕЛЬ (ДОБАВЛЕНЫ КОМАНДЫ ДЛЯ ПРЕДУПРЕЖДЕНИЙ) =====
 @bot.message_handler(commands=['admin'])
 @admin_only
 def admin_panel(message):
@@ -1030,8 +1112,34 @@ def admin_panel(message):
 /reports - Список новых жалоб
 /report [id] - Просмотр жалобы
 /sendto [id] [текст] - Личное сообщение пользователю
+/warnings [id] - Показать предупреждения
+/clearwarnings [id] - Очистить предупреждения
     """
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
+
+@bot.message_handler(commands=['warnings'])
+@admin_only
+def cmd_warnings(message):
+    """Показать предупреждения пользователя"""
+    try:
+        user_id = int(message.text.split()[1])
+    except:
+        bot.reply_to(message, "❌ Использование: /warnings [user_id]")
+        return
+    count = get_warnings(user_id)
+    bot.reply_to(message, f"👤 Пользователь {user_id} имеет {count} предупреждений.")
+
+@bot.message_handler(commands=['clearwarnings'])
+@admin_only
+def cmd_clear_warnings(message):
+    """Очистить предупреждения пользователя"""
+    try:
+        user_id = int(message.text.split()[1])
+    except:
+        bot.reply_to(message, "❌ Использование: /clearwarnings [user_id]")
+        return
+    clear_warnings(user_id)
+    bot.reply_to(message, f"✅ Предупреждения пользователя {user_id} очищены.")
 
 @bot.message_handler(commands=['admin_stats'])
 @admin_only
@@ -1210,7 +1318,7 @@ def admin_ban_from_report(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {e}")
 
-# ===== ОБРАБОТКА СООБЩЕНИЙ В ДИАЛОГЕ =====
+# ===== ОБРАБОТКА СООБЩЕНИЙ В ДИАЛОГЕ (С ДОБАВЛЕННЫМ ФИЛЬТРОМ) =====
 @bot.message_handler(func=lambda m: True, content_types=['text', 'photo', 'video', 'sticker', 'voice', 'document'])
 def handle_chat_message(message):
     user_id = message.from_user.id
@@ -1219,11 +1327,57 @@ def handle_chat_message(message):
     if is_user_banned(user_id):
         bot.reply_to(message, "🚫 Вы забанены.")
         return
+
+    # ===== ПРОВЕРКА НА МАТ =====
+    text_to_check = message.text or message.caption
+    if text_to_check and contains_bad_words(text_to_check):
+        try:
+            # Удаляем сообщение
+            bot.delete_message(message.chat.id, message.message_id)
+            # Добавляем предупреждение
+            warning_count, was_banned = add_warning(user_id, "Мат/оскорбления")
+            if was_banned:
+                bot.send_message(
+                    user_id,
+                    "🚫 Вы забанены за 3 нарушения правил."
+                )
+                # Уведомляем админов
+                for admin_id in ADMIN_IDS:
+                    try:
+                        bot.send_message(
+                            admin_id,
+                            f"🔨 Пользователь {user_id} забанен (3 нарушения мата)"
+                        )
+                    except:
+                        pass
+            else:
+                bot.send_message(
+                    user_id,
+                    f"🚫 Ваше сообщение содержит недопустимые выражения и было удалено.\n"
+                    f"⚠️ Предупреждение {warning_count}/3. После 3-го предупреждения - бан."
+                )
+            # Логируем для админов
+            for admin_id in ADMIN_IDS:
+                try:
+                    bot.send_message(
+                        admin_id,
+                        f"⚠️ Нарушение от пользователя {user_id}:\n"
+                        f"Сообщение удалено: {text_to_check}\n"
+                        f"Предупреждение {warning_count}/3"
+                    )
+                except:
+                    pass
+            return  # Прерываем обработку, сообщение не уходит
+        except Exception as e:
+            logger.error(f"Ошибка при обработке мата: {e}")
+
     conv = get_active_conversation(user_id)
     if not conv:
         bot.send_message(user_id, "❌ У тебя нет активного диалога. Найди собеседника в меню.")
         return
     partner_id = get_partner_id(user_id, conv)
+
+    # Логируем сообщение (для жалоб)
     try:
         msg_text = message.text or message.caption or f"[{message.content_type}]"
         conn = get_db_connection()
@@ -1234,6 +1388,8 @@ def handle_chat_message(message):
         conn.close()
     except Exception as e:
         logger.error(f"Ошибка логирования: {e}")
+
+    # Пересылаем собеседнику
     try:
         if message.content_type == 'text':
             bot.send_message(partner_id, f"💬 {message.text}")
@@ -1257,7 +1413,7 @@ def handle_chat_message(message):
 # ===== ЗАПУСК =====
 if __name__ == '__main__':
     print("=" * 50)
-    print("🤖 Анонимный чат-бот (мультиадминка с диагностикой)")
+    print("🤖 Анонимный чат-бот с фильтром мата и предупреждениями")
     print("=" * 50)
     print(f"👑 Админы: {', '.join(map(str, ADMIN_IDS))}")
     print("🟢 Запуск...")
