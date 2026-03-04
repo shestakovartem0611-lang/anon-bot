@@ -14,11 +14,11 @@ TOKEN = '8494465153:AAGhNsVnNmDE0LTtSSh2A5GE013Wptw0tvw'  # твой токен
 ADMIN_IDS = [1760627021, 2091630272]                     # ID администраторов
 REFERRAL_BONUS = 20                                      # бонус за приглашённого друга (монет)
 REFERRAL_BONUS_FOR_NEW = 10                              # бонус новому пользователю за регистрацию по рефералке
-DONATION_AMOUNTS = [5, 10, 20, 50, 100, 200]             # суммы для донатов
+DONATION_AMOUNTS = [5, 10, 20, 50, 100, 200, 250, 300, 500]             # суммы для донатов
 ADULT_AGE = 18                                            # возраст совершеннолетия
 
 # Путь к базе данных – для постоянного хранения
-DB_PATH = '/app/data/dating_bot.db'
+DB_PATH = '/app/data/test'
 # Создаём папку, если её нет
 os.makedirs('/app/data', exist_ok=True)
 
