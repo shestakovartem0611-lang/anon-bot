@@ -14,12 +14,12 @@ TOKEN = '8494465153:AAGhNsVnNmDE0LTtSSh2A5GE013Wptw0tvw'  # твой токен
 ADMIN_IDS = [1760627021, 2091630272]                     # ID администраторов
 REFERRAL_BONUS = 20                                      # бонус за приглашённого друга (монет)
 REFERRAL_BONUS_FOR_NEW = 10                              # бонус новому пользователю за регистрацию по рефералке
-DONATION_AMOUNTS = [5, 10, 20, 50, 100, 200, 250, 300, 500]             # суммы для донатов
+DONATION_AMOUNTS = [5, 10, 20, 50, 100, 200]             # суммы для донатов
 ADULT_AGE = 18                                            # возраст совершеннолетия
+ONLINE_TIMEOUT = 300                                      # время (сек), в течение которого считаем админа онлайн (5 минут)
 
-# Путь к базе данных – для постоянного хранения
-DB_PATH = '/app/data/test'
-# Создаём папку, если её нет
+# Путь к базе данных – теперь файл называется database.db
+DB_PATH = '/app/data/database.db'
 os.makedirs('/app/data', exist_ok=True)
 
 # Настройка логирования
@@ -1080,12 +1080,12 @@ def process_reply_to_admin(message):
     bot.send_message(user_id, "✅ Твой ответ отправлен администратору.")
     user_data.pop(user_id, None)
 
-# ===== АДМИН-ПАНЕЛЬ (исправленный текст) =====
+# ===== АДМИН-ПАНЕЛЬ (исправленная) =====
 @bot.message_handler(commands=['admin'])
 @admin_only
 def admin_panel(message):
     text = """
-✨ **Обновлённая админ-панель**
+👑 **Админ-панель**
 
 Доступные команды:
 /admin_stats - Детальная статистика
@@ -1099,8 +1099,38 @@ def admin_panel(message):
 /sendto [id] [текст] - Личное сообщение пользователю
 /warnings [id] - Показать предупреждения
 /clearwarnings [id] - Очистить предупреждения
+/adminlist - Список администраторов и их статус
     """
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
+
+# ===== КОМАНДА ADMINLIST =====
+@bot.message_handler(commands=['adminlist'])
+@admin_only
+def cmd_adminlist(message):
+    """Показывает список администраторов и их статус"""
+    lines = ["👑 **Список администраторов:**\n"]
+
+    for admin_id in ADMIN_IDS:
+        user = get_user(admin_id)
+        if not user:
+            # Если админ ещё не зарегистрирован в БД (не писал /start)
+            name = f"Пользователь {admin_id}"
+            status = "❌ Не активен (нет в БД)"
+        else:
+            name = user['first_name'] or user['username'] or f"Пользователь {admin_id}"
+            last_active = user['last_active']
+            if last_active:
+                last_active_time = datetime.fromisoformat(last_active)
+                time_diff = datetime.now() - last_active_time
+                if time_diff.total_seconds() < ONLINE_TIMEOUT:
+                    status = "🟢 Онлайн"
+                else:
+                    status = f"🔴 Офлайн (был {last_active_time.strftime('%d.%m %H:%M')})"
+            else:
+                status = "🔴 Офлайн"
+        lines.append(f"• {name} (`{admin_id}`) — {status}")
+
+    bot.send_message(message.chat.id, "\n".join(lines), parse_mode='Markdown')
 
 @bot.message_handler(commands=['warnings'])
 @admin_only
@@ -1311,6 +1341,7 @@ def handle_chat_message(message):
         bot.reply_to(message, "🚫 Вы забанены.")
         return
 
+    # Определяем, нужно ли применять фильтр
     apply_filter = False
     text_to_check = message.text or message.caption
 
@@ -1403,7 +1434,7 @@ def handle_chat_message(message):
 # ===== ЗАПУСК =====
 if __name__ == '__main__':
     print("=" * 50)
-    print("🤖 Анонимный чат-бот с возрастным фильтром мата")
+    print("🤖 Анонимный чат-бот с командой adminlist и базой database.db")
     print("=" * 50)
     print(f"👑 Админы: {', '.join(map(str, ADMIN_IDS))}")
     print("🟢 Запуск...")
