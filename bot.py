@@ -1113,9 +1113,9 @@ def cmd_adminlist(message):
     for admin_id in ADMIN_IDS:
         user = get_user(admin_id)
         if not user:
-            # Если админ ещё не зарегистрирован в БД (не писал /start)
+            # Если админ ещё не зарегистрирован в Базе данных (тоесть не писал /start)
             name = f"Пользователь {admin_id}"
-            status = "❌ Не активен (нет в БД)"
+            status = "❌ Не в сети (нет в Базе данных)"
         else:
             name = user['first_name'] or user['username'] or f"Пользователь {admin_id}"
             last_active = user['last_active']
