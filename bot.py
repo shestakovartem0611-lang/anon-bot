@@ -1085,7 +1085,7 @@ def process_reply_to_admin(message):
 @admin_only
 def admin_panel(message):
     text = """
-👑 **Админ-панель**
+✨ **Обновлённая админ-панель**
 
 Доступные команды:
 /admin_stats - Детальная статистика
