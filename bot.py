@@ -1055,7 +1055,7 @@ def cmd_adminlist(message):
         user = get_user(admin_id)
         if not user:
             name = f"Пользователь {admin_id}"
-            status = "❌ Не активен (нет в БД)"
+            status = "❌ Не активен (нет в Базе данных)"
         else:
             name = user['first_name'] or user['username'] or f"Пользователь {admin_id}"
             last_active = user['last_active']
