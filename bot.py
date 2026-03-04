@@ -15,6 +15,12 @@ ADMIN_IDS = [1760627021, 2091630272]                     # ID администр
 REFERRAL_BONUS = 20                                      # бонус за приглашённого друга (монет)
 REFERRAL_BONUS_FOR_NEW = 10                              # бонус новому пользователю за регистрацию по рефералке
 DONATION_AMOUNTS = [5, 10, 20, 50, 100, 200]             # суммы для донатов
+ADULT_AGE = 18                                            # возраст совершеннолетия
+
+# Путь к базе данных – для постоянного хранения
+DB_PATH = '/app/data/dating_bot.db'
+# Создаём папку, если её нет
+os.makedirs('/app/data', exist_ok=True)
 
 # Настройка логирования
 logging.basicConfig(
@@ -31,14 +37,13 @@ bot = telebot.TeleBot(TOKEN)
 
 # ===== БАЗА ДАННЫХ С ИМЕНОВАННЫМИ ПОЛЯМИ =====
 def get_db_connection():
-    conn = sqlite3.connect('dating_bot.db', check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
-    # Таблица пользователей
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -64,7 +69,6 @@ def init_db():
             referrer_id INTEGER DEFAULT NULL
         )
     ''')
-    # Таблица достижений
     cur.execute('''
         CREATE TABLE IF NOT EXISTS achievements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,7 +87,6 @@ def init_db():
             PRIMARY KEY (user_id, achievement_id)
         )
     ''')
-    # Таблица для учёта наград за рефералов
     cur.execute('''
         CREATE TABLE IF NOT EXISTS referral_rewards (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,7 +96,6 @@ def init_db():
             rewarded_at TIMESTAMP
         )
     ''')
-    # Таблица диалогов
     cur.execute('''
         CREATE TABLE IF NOT EXISTS conversations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,7 +108,6 @@ def init_db():
             rated_by_user2 INTEGER DEFAULT 0
         )
     ''')
-    # Таблица оценок
     cur.execute('''
         CREATE TABLE IF NOT EXISTS ratings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -117,7 +118,6 @@ def init_db():
             conversation_id INTEGER
         )
     ''')
-    # Таблица очереди
     cur.execute('''
         CREATE TABLE IF NOT EXISTS waiting_queue (
             user_id INTEGER PRIMARY KEY,
@@ -125,7 +125,6 @@ def init_db():
             search_gender TEXT
         )
     ''')
-    # Таблица жалоб
     cur.execute('''
         CREATE TABLE IF NOT EXISTS reports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -139,7 +138,6 @@ def init_db():
             last_messages TEXT
         )
     ''')
-    # Таблица логов сообщений
     cur.execute('''
         CREATE TABLE IF NOT EXISTS message_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -149,7 +147,6 @@ def init_db():
             timestamp TIMESTAMP
         )
     ''')
-    # ===== НОВАЯ ТАБЛИЦА ДЛЯ ПРЕДУПРЕЖДЕНИЙ =====
     cur.execute('''
         CREATE TABLE IF NOT EXISTS warnings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -160,7 +157,6 @@ def init_db():
     ''')
     conn.commit()
 
-    # Заполняем достижения, если пусто
     cur.execute('SELECT COUNT(*) FROM achievements')
     if cur.fetchone()[0] == 0:
         achievements = [
@@ -188,7 +184,6 @@ init_db()
 
 # ===== ФИЛЬТР МАТА =====
 def load_bad_words():
-    """Загружает список запрещённых слов из файла"""
     try:
         with open('bad_words.txt', 'r', encoding='utf-8') as f:
             words = [line.strip().lower() for line in f if line.strip()]
@@ -201,7 +196,6 @@ def load_bad_words():
 BAD_WORDS = load_bad_words()
 
 def contains_bad_words(text):
-    """Проверяет, содержит ли текст запрещённые слова"""
     if not text or not BAD_WORDS:
         return False
     text_lower = text.lower()
@@ -212,7 +206,6 @@ def contains_bad_words(text):
 
 # ===== СИСТЕМА ПРЕДУПРЕЖДЕНИЙ =====
 def add_warning(user_id, reason="Нарушение правил"):
-    """Добавляет предупреждение пользователю. Возвращает (количество_предупреждений, был_ли_бан)"""
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('''
@@ -220,20 +213,15 @@ def add_warning(user_id, reason="Нарушение правил"):
         VALUES (?, ?, ?)
     ''', (user_id, reason, datetime.now()))
     conn.commit()
-    
-    # Получаем количество предупреждений
     cur.execute('SELECT COUNT(*) FROM warnings WHERE user_id = ?', (user_id,))
     warning_count = cur.fetchone()[0]
     conn.close()
-    
-    # Если 3 предупреждения - бан
     if warning_count >= 3:
-        ban_user(user_id, "3 предупреждения о нарушении", None)  # None, потому что банит система, не админ
+        ban_user(user_id, "3 предупреждения о нарушении", None)
         return warning_count, True
     return warning_count, False
 
 def get_warnings(user_id):
-    """Возвращает количество предупреждений пользователя"""
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('SELECT COUNT(*) FROM warnings WHERE user_id = ?', (user_id,))
@@ -242,7 +230,6 @@ def get_warnings(user_id):
     return count
 
 def clear_warnings(user_id):
-    """Очищает предупреждения пользователя"""
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('DELETE FROM warnings WHERE user_id = ?', (user_id,))
@@ -421,7 +408,6 @@ def ban_user(user_id, reason='Нарушение правил', admin_id=None):
     cur.execute('UPDATE users SET is_banned = 1, ban_reason = ? WHERE user_id = ?', (reason, user_id))
     cur.execute('DELETE FROM waiting_queue WHERE user_id = ?', (user_id,))
     cur.execute('UPDATE conversations SET is_active = 0 WHERE user1_id = ? OR user2_id = ?', (user_id, user_id))
-    # При бане очищаем предупреждения
     cur.execute('DELETE FROM warnings WHERE user_id = ?', (user_id,))
     conn.commit()
     conn.close()
@@ -436,7 +422,6 @@ def unban_user(user_id):
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('UPDATE users SET is_banned = 0, ban_reason = NULL WHERE user_id = ?', (user_id,))
-    # При разбане тоже очищаем предупреждения (можно и не очищать, но для порядка)
     cur.execute('DELETE FROM warnings WHERE user_id = ?', (user_id,))
     conn.commit()
     conn.close()
@@ -1095,7 +1080,7 @@ def process_reply_to_admin(message):
     bot.send_message(user_id, "✅ Твой ответ отправлен администратору.")
     user_data.pop(user_id, None)
 
-# ===== АДМИН-ПАНЕЛЬ (ДОБАВЛЕНЫ КОМАНДЫ ДЛЯ ПРЕДУПРЕЖДЕНИЙ) =====
+# ===== АДМИН-ПАНЕЛЬ (исправленный текст) =====
 @bot.message_handler(commands=['admin'])
 @admin_only
 def admin_panel(message):
@@ -1120,7 +1105,6 @@ def admin_panel(message):
 @bot.message_handler(commands=['warnings'])
 @admin_only
 def cmd_warnings(message):
-    """Показать предупреждения пользователя"""
     try:
         user_id = int(message.text.split()[1])
     except:
@@ -1132,7 +1116,6 @@ def cmd_warnings(message):
 @bot.message_handler(commands=['clearwarnings'])
 @admin_only
 def cmd_clear_warnings(message):
-    """Очистить предупреждения пользователя"""
     try:
         user_id = int(message.text.split()[1])
     except:
@@ -1159,9 +1142,9 @@ def admin_stats(message):
     text = f"""
 📈 **Детальная статистика**
 👥 Всего пользователей: {total}
-🚫 Забаненые пользователи: {banned}
+🚫 Забанено: {banned}
 💬 Активных диалогов: {active}
-🕒 В поиске: {waiting}
+🕒 В очереди: {waiting}
 📅 Активных сегодня: {active_today}
 🆕 Новых чатов сегодня: {new_chats_today}
 🪙 Всего монет: {total_coins}
@@ -1318,7 +1301,7 @@ def admin_ban_from_report(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка: {e}")
 
-# ===== ОБРАБОТКА СООБЩЕНИЙ В ДИАЛОГЕ (С ДОБАВЛЕННЫМ ФИЛЬТРОМ) =====
+# ===== ОБРАБОТКА СООБЩЕНИЙ В ДИАЛОГЕ (С ВОЗРАСТНОЙ ЛОГИКОЙ) =====
 @bot.message_handler(func=lambda m: True, content_types=['text', 'photo', 'video', 'sticker', 'voice', 'document'])
 def handle_chat_message(message):
     user_id = message.from_user.id
@@ -1328,26 +1311,36 @@ def handle_chat_message(message):
         bot.reply_to(message, "🚫 Вы забанены.")
         return
 
-    # ===== ПРОВЕРКА НА МАТ =====
+    apply_filter = False
     text_to_check = message.text or message.caption
-    if text_to_check and contains_bad_words(text_to_check):
+
+    sender = get_user(user_id)
+    sender_age = sender['age'] if sender else 0
+
+    if sender_age < ADULT_AGE:
+        apply_filter = True
+    else:
+        conv = get_active_conversation(user_id)
+        if conv:
+            partner_id = get_partner_id(user_id, conv)
+            partner = get_user(partner_id)
+            partner_age = partner['age'] if partner else 0
+            if partner_age < ADULT_AGE:
+                apply_filter = True
+            else:
+                apply_filter = False
+        else:
+            apply_filter = False
+
+    if apply_filter and text_to_check and contains_bad_words(text_to_check):
         try:
-            # Удаляем сообщение
             bot.delete_message(message.chat.id, message.message_id)
-            # Добавляем предупреждение
             warning_count, was_banned = add_warning(user_id, "Мат/оскорбления")
             if was_banned:
-                bot.send_message(
-                    user_id,
-                    "🚫 Вы забанены за 3 нарушения правил."
-                )
-                # Уведомляем админов
+                bot.send_message(user_id, "🚫 Вы забанены за 3 нарушения правил.")
                 for admin_id in ADMIN_IDS:
                     try:
-                        bot.send_message(
-                            admin_id,
-                            f"🔨 Пользователь {user_id} забанен (3 нарушения мата)"
-                        )
+                        bot.send_message(admin_id, f"🔨 Пользователь {user_id} забанен (3 нарушения мата)")
                     except:
                         pass
             else:
@@ -1356,7 +1349,6 @@ def handle_chat_message(message):
                     f"🚫 Ваше сообщение содержит недопустимые выражения и было удалено.\n"
                     f"⚠️ Предупреждение {warning_count}/3. После 3-го предупреждения - бан."
                 )
-            # Логируем для админов
             for admin_id in ADMIN_IDS:
                 try:
                     bot.send_message(
@@ -1367,7 +1359,7 @@ def handle_chat_message(message):
                     )
                 except:
                     pass
-            return  # Прерываем обработку, сообщение не уходит
+            return
         except Exception as e:
             logger.error(f"Ошибка при обработке мата: {e}")
 
@@ -1377,7 +1369,6 @@ def handle_chat_message(message):
         return
     partner_id = get_partner_id(user_id, conv)
 
-    # Логируем сообщение (для жалоб)
     try:
         msg_text = message.text or message.caption or f"[{message.content_type}]"
         conn = get_db_connection()
@@ -1389,7 +1380,6 @@ def handle_chat_message(message):
     except Exception as e:
         logger.error(f"Ошибка логирования: {e}")
 
-    # Пересылаем собеседнику
     try:
         if message.content_type == 'text':
             bot.send_message(partner_id, f"💬 {message.text}")
@@ -1413,7 +1403,7 @@ def handle_chat_message(message):
 # ===== ЗАПУСК =====
 if __name__ == '__main__':
     print("=" * 50)
-    print("🤖 Анонимный чат-бот с фильтром мата и предупреждениями")
+    print("🤖 Анонимный чат-бот с возрастным фильтром мата")
     print("=" * 50)
     print(f"👑 Админы: {', '.join(map(str, ADMIN_IDS))}")
     print("🟢 Запуск...")
