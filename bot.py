@@ -1159,9 +1159,9 @@ def admin_stats(message):
     text = f"""
 📈 **Детальная статистика**
 👥 Всего пользователей: {total}
-🚫 Забанено: {banned}
+🚫 Забаненые пользователи: {banned}
 💬 Активных диалогов: {active}
-🕒 В очереди: {waiting}
+🕒 В поиске: {waiting}
 📅 Активных сегодня: {active_today}
 🆕 Новых чатов сегодня: {new_chats_today}
 🪙 Всего монет: {total_coins}
