@@ -18,7 +18,7 @@ DONATION_AMOUNTS = [5, 10, 20, 50, 100, 200]             # суммы для д�
 ADULT_AGE = 18                                            # возраст совершеннолетия
 ONLINE_TIMEOUT = 300                                      # время (сек), в течение которого считаем админа онлайн (5 минут)
 
-# Путь к базе данных – для постоянного хранения на Bothost
+# Путь к базе данных
 DB_PATH = '/app/data/database.db'
 os.makedirs('/app/data', exist_ok=True)
 
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 bot = telebot.TeleBot(TOKEN)
 
-# ===== БАЗА ДАННЫХ (УПРОЩЁННАЯ, БЕЗ BIO И PHOTO) =====
+# ===== БАЗА ДАННЫХ (УПРОЩЁННАЯ) =====
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -44,7 +44,6 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
-    # Таблица пользователей – только возраст, пол, предпочтения
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -68,7 +67,6 @@ def init_db():
             referrer_id INTEGER DEFAULT NULL
         )
     ''')
-    # Достижения (можно оставить, но проверка photo будет игнорироваться)
     cur.execute('''
         CREATE TABLE IF NOT EXISTS achievements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,7 +155,6 @@ def init_db():
     ''')
     conn.commit()
 
-    # Заполняем достижения (достижение "Фотогеничный" просто никогда не сработает)
     cur.execute('SELECT COUNT(*) FROM achievements')
     if cur.fetchone()[0] == 0:
         achievements = [
@@ -167,7 +164,7 @@ def init_db():
             ('Популярный', 'Получить 50 лайков', 'likes', 50, 50),
             ('Джентльмен', 'Получить 5 комплиментов', 'consecutive_likes', 5, 10),
             ('Завсегдатай', 'Заходить 7 дней подряд', 'streak_days', 7, 30),
-            ('Фотогеничный', 'Загрузить фото', 'photo', 1, 5),  # не будет разблокировано
+            ('Фотогеничный', 'Загрузить фото', 'photo', 1, 5),
             ('Душа компании', 'Провести 5 диалогов за день', 'daily_conversations', 5, 25),
             ('Модератор', 'Отправить 3 жалобы', 'reports', 3, 10),
             ('Благодетель', 'Сделать донат', 'donation', 1, 0)
@@ -183,7 +180,7 @@ def init_db():
 
 init_db()
 
-# ===== ФИЛЬТР МАТА (ОПЦИОНАЛЬНО) =====
+# ===== ФИЛЬТР МАТА =====
 def load_bad_words():
     try:
         with open('bad_words.txt', 'r', encoding='utf-8') as f:
@@ -274,7 +271,6 @@ def save_user(user_id, username, first_name, referrer_id=None):
     conn.close()
 
 def update_user_profile(user_id, age, gender, search_gender):
-    """Обновляет только три поля анкеты"""
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('''
@@ -496,7 +492,6 @@ def check_achievements(user_id):
             unlocked = True
         elif cond_type == 'likes' and likes >= cond_val:
             unlocked = True
-        # Достижение "Фотогеничный" никогда не сработает, так как photo нет
         if unlocked:
             cur.execute('UPDATE users SET coins = coins + ? WHERE user_id = ?', (reward, user_id))
             cur.execute('INSERT INTO user_achievements (user_id, achievement_id, unlocked_at) VALUES (?, ?, ?)',
@@ -517,7 +512,7 @@ def admin_only(func):
         return func(message)
     return wrapper
 
-# ===== РЕГИСТРАЦИЯ АНКЕТЫ (ТОЛЬКО ТРИ ПОЛЯ) =====
+# ===== РЕГИСТРАЦИЯ АНКЕТЫ =====
 user_data = {}
 
 @bot.message_handler(commands=['start'])
@@ -1021,7 +1016,7 @@ def process_reply_to_admin(message):
     bot.send_message(user_id, "✅ Твой ответ отправлен администратору.")
     user_data.pop(user_id, None)
 
-# ===== АДМИН-ПАНЕЛЬ =====
+# ===== АДМИН-ПАНЕЛЬ (С НОВОЙ КОМАНДОЙ) =====
 @bot.message_handler(commands=['admin'])
 @admin_only
 def admin_panel(message):
@@ -1041,6 +1036,7 @@ def admin_panel(message):
 /warnings [id] - Показать предупреждения
 /clearwarnings [id] - Очистить предупреждения
 /adminlist - Список администраторов и их статус
+/viewprofile [id] - Просмотр профиля пользователя
     """
     bot.send_message(message.chat.id, text, parse_mode='Markdown')
 
@@ -1268,6 +1264,48 @@ def cmd_adminlist(message):
         lines.append(f"• {name} (`{admin_id}`) — {status}")
     bot.send_message(message.chat.id, "\n".join(lines), parse_mode='Markdown')
 
+# ===== НОВАЯ КОМАНДА: ПРОСМОТР ПРОФИЛЯ ПО ID =====
+@bot.message_handler(commands=['viewprofile'])
+@admin_only
+def cmd_viewprofile(message):
+    try:
+        target_id = int(message.text.split()[1])
+    except (IndexError, ValueError):
+        bot.reply_to(message, "❌ Использование: /viewprofile [user_id]")
+        return
+
+    user = get_user(target_id)
+    if not user:
+        bot.reply_to(message, f"❌ Пользователь с ID {target_id} не найден.")
+        return
+
+    # Статистика диалогов и предупреждений
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute('SELECT COUNT(*) FROM conversations WHERE (user1_id = ? OR user2_id = ?) AND is_active = 0', (target_id, target_id))
+    total_dialogs = cur.fetchone()[0]
+    cur.execute('SELECT COUNT(*) FROM warnings WHERE user_id = ?', (target_id,))
+    warnings_count = cur.fetchone()[0]
+    conn.close()
+
+    # Формируем текст
+    gender_str = {'male': 'Парень', 'female': 'Девушка', 'other': 'Другое'}.get(user['gender'], user['gender'])
+    search_str = {'male': 'Парней', 'female': 'Девушек', 'both': 'Всех'}.get(user['search_gender'], user['search_gender'])
+
+    profile_text = f"""
+👤 **Профиль пользователя {target_id}**
+Возраст: {user['age']}
+Пол: {gender_str}
+Ищу: {search_str}
+Уровень: {user['level']}
+Рейтинг: {user['rating']}
+Монеты: {user['coins']}
+Диалогов: {total_dialogs}
+Предупреждений: {warnings_count}
+Статус: {"🔴 Забанен" if user['is_banned'] else "🟢 Активен"}
+    """
+    bot.send_message(message.chat.id, profile_text, parse_mode='Markdown')
+
 # ===== ОБРАБОТКА СООБЩЕНИЙ В ДИАЛОГЕ =====
 @bot.message_handler(func=lambda m: True, content_types=['text', 'photo', 'video', 'sticker', 'voice', 'document'])
 def handle_chat_message(message):
@@ -1278,7 +1316,7 @@ def handle_chat_message(message):
         bot.reply_to(message, "🚫 Вы забанены.")
         return
 
-    # Проверка на мат (с возрастной логикой)
+    # Проверка на мат
     apply_filter = False
     text_to_check = message.text or message.caption
 
@@ -1373,7 +1411,7 @@ def handle_chat_message(message):
 # ===== ЗАПУСК =====
 if __name__ == '__main__':
     print("=" * 50)
-    print("🤖 Упрощённый анонимный чат-бот (только возраст/пол/поиск)")
+    print("🤖 Анонимный чат-бот с командой /viewprofile")
     print("=" * 50)
     print(f"👑 Админы: {', '.join(map(str, ADMIN_IDS))}")
     print("🟢 Запуск...")
