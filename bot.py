@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 bot = telebot.TeleBot(TOKEN)
 
-# ===== БАЗА ДАННЫХ С ИМЕНОВАННЫМИ ПОЛЯМИ =====
+# ===== БАЗА ДАННЫХ (УПРОЩЁННАЯ, БЕЗ BIO И PHOTO) =====
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -44,7 +44,7 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
-    # Таблица пользователей (полная, с фото и био)
+    # Таблица пользователей – только возраст, пол, предпочтения
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -53,8 +53,6 @@ def init_db():
             age INTEGER DEFAULT 0,
             gender TEXT DEFAULT 'не указан',
             search_gender TEXT DEFAULT 'both',
-            bio TEXT DEFAULT '',
-            photo_file_id TEXT,
             reg_date TIMESTAMP,
             last_active TIMESTAMP,
             is_banned INTEGER DEFAULT 0,
@@ -70,7 +68,7 @@ def init_db():
             referrer_id INTEGER DEFAULT NULL
         )
     ''')
-    # Таблица достижений
+    # Достижения (можно оставить, но проверка photo будет игнорироваться)
     cur.execute('''
         CREATE TABLE IF NOT EXISTS achievements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,7 +87,6 @@ def init_db():
             PRIMARY KEY (user_id, achievement_id)
         )
     ''')
-    # Таблица для учёта наград за рефералов
     cur.execute('''
         CREATE TABLE IF NOT EXISTS referral_rewards (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,7 +96,6 @@ def init_db():
             rewarded_at TIMESTAMP
         )
     ''')
-    # Таблица диалогов
     cur.execute('''
         CREATE TABLE IF NOT EXISTS conversations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,7 +108,6 @@ def init_db():
             rated_by_user2 INTEGER DEFAULT 0
         )
     ''')
-    # Таблица оценок
     cur.execute('''
         CREATE TABLE IF NOT EXISTS ratings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,7 +118,6 @@ def init_db():
             conversation_id INTEGER
         )
     ''')
-    # Таблица очереди
     cur.execute('''
         CREATE TABLE IF NOT EXISTS waiting_queue (
             user_id INTEGER PRIMARY KEY,
@@ -131,7 +125,6 @@ def init_db():
             search_gender TEXT
         )
     ''')
-    # Таблица жалоб
     cur.execute('''
         CREATE TABLE IF NOT EXISTS reports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,7 +138,6 @@ def init_db():
             last_messages TEXT
         )
     ''')
-    # Таблица логов сообщений
     cur.execute('''
         CREATE TABLE IF NOT EXISTS message_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -155,7 +147,6 @@ def init_db():
             timestamp TIMESTAMP
         )
     ''')
-    # Таблица предупреждений
     cur.execute('''
         CREATE TABLE IF NOT EXISTS warnings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -166,7 +157,7 @@ def init_db():
     ''')
     conn.commit()
 
-    # Заполняем достижения, если пусто
+    # Заполняем достижения (достижение "Фотогеничный" просто никогда не сработает)
     cur.execute('SELECT COUNT(*) FROM achievements')
     if cur.fetchone()[0] == 0:
         achievements = [
@@ -176,7 +167,7 @@ def init_db():
             ('Популярный', 'Получить 50 лайков', 'likes', 50, 50),
             ('Джентльмен', 'Получить 5 комплиментов', 'consecutive_likes', 5, 10),
             ('Завсегдатай', 'Заходить 7 дней подряд', 'streak_days', 7, 30),
-            ('Фотогеничный', 'Загрузить фото', 'photo', 1, 5),
+            ('Фотогеничный', 'Загрузить фото', 'photo', 1, 5),  # не будет разблокировано
             ('Душа компании', 'Провести 5 диалогов за день', 'daily_conversations', 5, 25),
             ('Модератор', 'Отправить 3 жалобы', 'reports', 3, 10),
             ('Благодетель', 'Сделать донат', 'donation', 1, 0)
@@ -192,7 +183,7 @@ def init_db():
 
 init_db()
 
-# ===== ФИЛЬТР МАТА =====
+# ===== ФИЛЬТР МАТА (ОПЦИОНАЛЬНО) =====
 def load_bad_words():
     try:
         with open('bad_words.txt', 'r', encoding='utf-8') as f:
@@ -282,19 +273,14 @@ def save_user(user_id, username, first_name, referrer_id=None):
     conn.commit()
     conn.close()
 
-def update_user_profile(user_id, age, gender, search_gender, bio, photo_file_id=None):
+def update_user_profile(user_id, age, gender, search_gender):
+    """Обновляет только три поля анкеты"""
     conn = get_db_connection()
     cur = conn.cursor()
-    if photo_file_id:
-        cur.execute('''
-            UPDATE users SET age = ?, gender = ?, search_gender = ?, bio = ?, photo_file_id = ?, last_active = ?
-            WHERE user_id = ?
-        ''', (age, gender, search_gender, bio, photo_file_id, datetime.now(), user_id))
-    else:
-        cur.execute('''
-            UPDATE users SET age = ?, gender = ?, search_gender = ?, bio = ?, last_active = ?
-            WHERE user_id = ?
-        ''', (age, gender, search_gender, bio, datetime.now(), user_id))
+    cur.execute('''
+        UPDATE users SET age = ?, gender = ?, search_gender = ?, last_active = ?
+        WHERE user_id = ?
+    ''', (age, gender, search_gender, datetime.now(), user_id))
     conn.commit()
     conn.close()
 
@@ -304,8 +290,7 @@ def is_profile_complete(user_id):
         return False
     return (user['age'] and user['age'] != 0 and
             user['gender'] and user['gender'] != 'не указан' and
-            user['search_gender'] is not None and user['search_gender'] != '' and
-            user['bio'] is not None and user['bio'] != '')
+            user['search_gender'] is not None and user['search_gender'] != '')
 
 def get_active_conversation(user_id):
     conn = get_db_connection()
@@ -500,7 +485,7 @@ def check_achievements(user_id):
     if not user_data:
         conn.close()
         return
-    convs, likes, _, _, photo = user_data['total_conversations'], user_data['total_likes'], user_data['coins'], user_data['last_bonus'], user_data['photo_file_id']
+    convs, likes, _, _, _ = user_data['total_conversations'], user_data['total_likes'], user_data['coins'], user_data['last_bonus'], user_data['photo_file_id']
     for ach in achievements:
         ach_id, cond_type, cond_val, reward = ach['id'], ach['condition_type'], ach['condition_value'], ach['reward_coins']
         cur.execute('SELECT 1 FROM user_achievements WHERE user_id = ? AND achievement_id = ?', (user_id, ach_id))
@@ -511,8 +496,7 @@ def check_achievements(user_id):
             unlocked = True
         elif cond_type == 'likes' and likes >= cond_val:
             unlocked = True
-        elif cond_type == 'photo' and photo:
-            unlocked = True
+        # Достижение "Фотогеничный" никогда не сработает, так как photo нет
         if unlocked:
             cur.execute('UPDATE users SET coins = coins + ? WHERE user_id = ?', (reward, user_id))
             cur.execute('INSERT INTO user_achievements (user_id, achievement_id, unlocked_at) VALUES (?, ?, ?)',
@@ -533,7 +517,7 @@ def admin_only(func):
         return func(message)
     return wrapper
 
-# ===== РЕГИСТРАЦИЯ АНКЕТЫ =====
+# ===== РЕГИСТРАЦИЯ АНКЕТЫ (ТОЛЬКО ТРИ ПОЛЯ) =====
 user_data = {}
 
 @bot.message_handler(commands=['start'])
@@ -597,28 +581,8 @@ def process_search_gender(message):
         search = 'female'
     else:
         search = 'both'
-    user_data[user_id]['search_gender'] = search
-    user_data[user_id]['step'] = 'bio'
-    bot.send_message(user_id, "Напиши немного о себе (до 300 символов).", reply_markup=types.ReplyKeyboardRemove())
-
-@bot.message_handler(func=lambda m: m.from_user.id in user_data and user_data[m.from_user.id]['step'] == 'bio')
-def process_bio(message):
-    user_id = message.from_user.id
-    bio = message.text[:300]
-    user_data[user_id]['bio'] = bio
-    user_data[user_id]['step'] = 'photo'
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    markup.add('Пропустить')
-    bot.send_message(user_id, "Отправь своё фото (необязательно) или нажми 'Пропустить'.", reply_markup=markup)
-
-@bot.message_handler(func=lambda m: m.from_user.id in user_data and user_data[m.from_user.id]['step'] == 'photo', content_types=['photo', 'text'])
-def process_photo(message):
-    user_id = message.from_user.id
-    photo_id = None
-    if message.content_type == 'photo':
-        photo_id = message.photo[-1].file_id
     data = user_data.pop(user_id)
-    update_user_profile(user_id, data['age'], data['gender'], data['search_gender'], data['bio'], photo_id)
+    update_user_profile(user_id, data['age'], data['gender'], search)
     bot.send_message(user_id, "✅ Анкета сохранена!", reply_markup=types.ReplyKeyboardRemove())
     show_main_menu(user_id)
 
@@ -627,7 +591,7 @@ def show_main_menu(chat_id):
     markup.add('🔍 Найти собеседника', '⏹ Завершить диалог')
     markup.add('👤 Моя анкета', '✏ Редактировать анкету')
     markup.add('📊 Статистика', '📈 Моя статистика')
-    markup.add('🏆 Топ', '🎁 Бонус', '✨ Сгенерировать описание')
+    markup.add('🏆 Топ', '🎁 Бонус')
     markup.add('💰 Донат', '🤝 Рефералы')
     bot.send_message(chat_id, "Главное меню:", reply_markup=markup)
 
@@ -646,7 +610,6 @@ def show_profile(message):
     age = user['age'] if user['age'] else 'не указан'
     gender = user['gender'] if user['gender'] else 'не указан'
     search_gender = user['search_gender'] if user['search_gender'] else 'не указано'
-    bio = user['bio'] if user['bio'] else 'не заполнено'
     level = user['level'] if user['level'] is not None else 1
     rating = user['rating'] if user['rating'] is not None else 0
     coins = user['coins'] if user['coins'] is not None else 0
@@ -665,20 +628,12 @@ def show_profile(message):
 Возраст: {age}
 Пол: {gender_str}
 Ищу: {search_str}
-О себе: {bio}
 Уровень: {level}
 Рейтинг: {rating}
 Монеты: {coins}
 Приглашено друзей: {referrals_count}
     """
-    if user['photo_file_id']:
-        try:
-            bot.send_photo(user_id, user['photo_file_id'], caption=profile_text)
-        except Exception as e:
-            logger.error(f"Ошибка фото: {e}")
-            bot.send_message(user_id, profile_text + "\n\n(Фото не может быть отображено.)")
-    else:
-        bot.send_message(user_id, profile_text)
+    bot.send_message(user_id, profile_text)
 
 @bot.message_handler(func=lambda m: m.text == '✏ Редактировать анкету')
 def edit_profile(message):
@@ -844,30 +799,6 @@ def cmd_bonus(message):
     conn.commit()
     conn.close()
     bot.send_message(user_id, "🎉 Ты получил ежедневный бонус: +10 монет!")
-
-@bot.message_handler(func=lambda m: m.text == '✨ Сгенерировать описание' or m.text == '/generate_bio')
-def cmd_generate_bio(message):
-    user_id = message.from_user.id
-    user = get_user(user_id)
-    if not user:
-        return
-    gender_str = {'male': 'парень', 'female': 'девушка', 'other': 'человек'}.get(user['gender'], 'человек')
-    age = user['age'] if user['age'] else '?'
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    markup.add('Музыка', 'Спорт', 'Кино', 'Книги', 'Путешествия', 'Игры', 'Другое')
-    msg = bot.send_message(user_id, "Выбери свои интересы (можно несколько, через запятую):", reply_markup=markup)
-    bot.register_next_step_handler(msg, process_interests_for_bio, user_id, gender_str, age)
-
-def process_interests_for_bio(message, user_id, gender_str, age):
-    interests = message.text
-    bio = f"Привет! Я {gender_str}, мне {age} лет. Интересуюсь: {interests}. Буду рад(а) пообщаться!"
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('UPDATE users SET bio = ? WHERE user_id = ?', (bio, user_id))
-    conn.commit()
-    conn.close()
-    bot.send_message(user_id, f"✅ Описание сгенерировано и сохранено:\n{bio}", reply_markup=types.ReplyKeyboardRemove())
-    show_main_menu(user_id)
 
 # ===== ДОНАТЫ =====
 @bot.message_handler(func=lambda m: m.text == '💰 Донат' or m.text == '/donate')
@@ -1040,7 +971,7 @@ def process_report_reason(message):
     bot.send_message(user_id, "✅ Жалоба отправлена администратору. Спасибо!")
     check_achievements(user_id)
 
-# ===== КОМАНДА ОТПРАВКИ СООБЩЕНИЯ ПОЛЬЗОВАТЕЛЮ С ВОЗМОЖНОСТЬЮ ОТВЕТА =====
+# ===== КОМАНДА ОТПРАВКИ СООБЩЕНИЯ ПОЛЬЗОВАТЕЛЮ =====
 @bot.message_handler(commands=['sendto'])
 @admin_only
 def cmd_sendto(message):
@@ -1337,7 +1268,7 @@ def cmd_adminlist(message):
         lines.append(f"• {name} (`{admin_id}`) — {status}")
     bot.send_message(message.chat.id, "\n".join(lines), parse_mode='Markdown')
 
-# ===== ОБРАБОТКА СООБЩЕНИЙ В ДИАЛОГЕ (С ВОЗРАСТНОЙ ЛОГИКОЙ) =====
+# ===== ОБРАБОТКА СООБЩЕНИЙ В ДИАЛОГЕ =====
 @bot.message_handler(func=lambda m: True, content_types=['text', 'photo', 'video', 'sticker', 'voice', 'document'])
 def handle_chat_message(message):
     user_id = message.from_user.id
@@ -1347,7 +1278,7 @@ def handle_chat_message(message):
         bot.reply_to(message, "🚫 Вы забанены.")
         return
 
-    # Определяем, нужно ли применять фильтр
+    # Проверка на мат (с возрастной логикой)
     apply_filter = False
     text_to_check = message.text or message.caption
 
@@ -1418,7 +1349,7 @@ def handle_chat_message(message):
     except Exception as e:
         logger.error(f"Ошибка логирования: {e}")
 
-    # Пересылаем собеседнику
+    # Пересылаем
     try:
         if message.content_type == 'text':
             bot.send_message(partner_id, f"💬 {message.text}")
@@ -1442,7 +1373,7 @@ def handle_chat_message(message):
 # ===== ЗАПУСК =====
 if __name__ == '__main__':
     print("=" * 50)
-    print("🤖 Анонимный чат-бот с полным функционалом")
+    print("🤖 Упрощённый анонимный чат-бот (только возраст/пол/поиск)")
     print("=" * 50)
     print(f"👑 Админы: {', '.join(map(str, ADMIN_IDS))}")
     print("🟢 Запуск...")
